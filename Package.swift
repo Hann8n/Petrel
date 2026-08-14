@@ -31,9 +31,17 @@ let package = Package(
     ],
     targets: [
         // System library for libsecret (Linux only, ignored on other platforms)
+        // pkgConfig is only set on Linux so Xcode/macOS builds don't invoke pkg-config
+        // and emit "couldn't find pc file for libsecret-1" warnings.
         .systemLibrary(
             name: "CLibSecret",
-            pkgConfig: "libsecret-1",
+            pkgConfig: {
+                #if os(Linux)
+                    return "libsecret-1"
+                #else
+                    return nil
+                #endif
+            }(),
             providers: [
                 .apt(["libsecret-1-dev", "libglib2.0-dev", "pkg-config"]),
                 .yum(["libsecret-devel", "glib2-devel", "pkg-config"]),

@@ -1,7 +1,9 @@
 #include "shim.h"
-#include <libsecret/secret.h>
 #include <string.h>
 #include <stdlib.h>
+
+#ifdef __linux__
+#include <libsecret/secret.h>
 
 bool secret_store_password_simple(
     const char* schema_name,
@@ -168,3 +170,49 @@ bool secret_service_available(void) {
     
     return false;
 }
+
+#else // !__linux__
+// Stub implementations for non-Linux platforms (macOS/iOS) so the module
+// can be resolved without libsecret. These are never called at runtime
+// because LibSecretStore is #if os(Linux) only.
+bool secret_store_password_simple(
+    const char* schema_name,
+    const char* attribute_key,
+    const char* attribute_value,
+    const char* label,
+    const char* password,
+    size_t password_len,
+    char** error_message
+) {
+    (void)schema_name; (void)attribute_key; (void)attribute_value;
+    (void)label; (void)password; (void)password_len; (void)error_message;
+    return false;
+}
+
+char* secret_lookup_password_simple(
+    const char* schema_name,
+    const char* attribute_key,
+    const char* attribute_value,
+    size_t* out_len,
+    char** error_message
+) {
+    (void)schema_name; (void)attribute_key; (void)attribute_value;
+    (void)out_len; (void)error_message;
+    return NULL;
+}
+
+bool secret_clear_password_simple(
+    const char* schema_name,
+    const char* attribute_key,
+    const char* attribute_value,
+    char** error_message
+) {
+    (void)schema_name; (void)attribute_key; (void)attribute_value; (void)error_message;
+    return false;
+}
+
+bool secret_service_available(void) {
+    return false;
+}
+
+#endif
