@@ -8,11 +8,33 @@
 import Foundation
 
 public struct DIDDocument: ATProtocolCodable, ATProtocolValue {
-    let context: [String]
-    let id: String
-    let alsoKnownAs: [String]
-    let verificationMethod: [VerificationMethod]
-    let service: [Service]
+    public let context: [String]
+    public let id: String
+    public let alsoKnownAs: [String]
+    public let verificationMethod: [VerificationMethod]
+    public let service: [Service]
+
+    public init(
+        context: [String] = [],
+        id: String,
+        alsoKnownAs: [String] = [],
+        verificationMethod: [VerificationMethod] = [],
+        service: [Service] = []
+    ) {
+        self.context = context
+        self.id = id
+        self.alsoKnownAs = alsoKnownAs
+        self.verificationMethod = verificationMethod
+        self.service = service
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.context = try container.decodeIfPresent([String].self, forKey: .context) ?? []
+        self.id = try container.decode(String.self, forKey: .id)
+        self.alsoKnownAs = try container.decodeIfPresent([String].self, forKey: .alsoKnownAs) ?? []
+        self.verificationMethod = try container.decodeIfPresent([VerificationMethod].self, forKey: .verificationMethod) ?? []
+        self.service = try container.decodeIfPresent([Service].self, forKey: .service) ?? []
+    }
 
     enum CodingKeys: String, CodingKey {
         case context = "@context"
@@ -31,22 +53,22 @@ public struct DIDDocument: ATProtocolCodable, ATProtocolValue {
         var map = OrderedCBORMap()
 
         // Add fields in order
-        map = map.adding(key: "@context", value: context) // Array of Strings
-        map = map.adding(key: "id", value: id)
+        map.append(key: "@context", value: context) // Array of Strings
+        map.append(key: "id", value: id)
         if !alsoKnownAs.isEmpty { // Only add if not empty, common practice
-            map = map.adding(key: "alsoKnownAs", value: alsoKnownAs)
+            map.append(key: "alsoKnownAs", value: alsoKnownAs)
         }
 
         // Convert verificationMethod array
         let verificationMethodsCBOR = try verificationMethod.map { try $0.toCBORValue() }
         if !verificationMethodsCBOR.isEmpty {
-            map = map.adding(key: "verificationMethod", value: verificationMethodsCBOR)
+            map.append(key: "verificationMethod", value: verificationMethodsCBOR)
         }
 
         // Convert service array
         let servicesCBOR = try service.map { try $0.toCBORValue() }
         if !servicesCBOR.isEmpty {
-            map = map.adding(key: "service", value: servicesCBOR)
+            map.append(key: "service", value: servicesCBOR)
         }
 
         return map
@@ -54,9 +76,25 @@ public struct DIDDocument: ATProtocolCodable, ATProtocolValue {
 }
 
 public struct Service: ATProtocolCodable, ATProtocolValue {
-    let id: String
-    let type: String
-    let serviceEndpoint: String
+    public let id: String
+    public let type: String
+    public let serviceEndpoint: String
+
+    public init(id: String, type: String, serviceEndpoint: String) {
+        self.id = id
+        self.type = type
+        self.serviceEndpoint = serviceEndpoint
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.type = try container.decode(String.self, forKey: .type)
+        self.serviceEndpoint = try container.decode(String.self, forKey: .serviceEndpoint)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, serviceEndpoint
+    }
 
     public func isEqual(to other: any ATProtocolValue) -> Bool {
         guard let otherService = other as? Service else { return false }
@@ -66,18 +104,36 @@ public struct Service: ATProtocolCodable, ATProtocolValue {
 
     public func toCBORValue() throws -> Any {
         var map = OrderedCBORMap()
-        map = map.adding(key: "id", value: id)
-        map = map.adding(key: "type", value: type)
-        map = map.adding(key: "serviceEndpoint", value: serviceEndpoint)
+        map.append(key: "id", value: id)
+        map.append(key: "type", value: type)
+        map.append(key: "serviceEndpoint", value: serviceEndpoint)
         return map
     }
 }
 
 public struct VerificationMethod: ATProtocolCodable, ATProtocolValue {
-    let id: String
-    let type: String
-    let controller: String
-    let publicKeyMultibase: String
+    public let id: String
+    public let type: String
+    public let controller: String
+    public let publicKeyMultibase: String
+
+    public init(id: String, type: String, controller: String, publicKeyMultibase: String) {
+        self.id = id
+        self.type = type
+        self.controller = controller
+        self.publicKeyMultibase = publicKeyMultibase
+    }
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.id = try container.decode(String.self, forKey: .id)
+        self.type = try container.decode(String.self, forKey: .type)
+        self.controller = try container.decode(String.self, forKey: .controller)
+        self.publicKeyMultibase = try container.decodeIfPresent(String.self, forKey: .publicKeyMultibase) ?? ""
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case id, type, controller, publicKeyMultibase
+    }
 
     public func isEqual(to other: any ATProtocolValue) -> Bool {
         guard let otherVerificationMethod = other as? VerificationMethod else { return false }
@@ -88,10 +144,10 @@ public struct VerificationMethod: ATProtocolCodable, ATProtocolValue {
 
     public func toCBORValue() throws -> Any {
         var map = OrderedCBORMap()
-        map = map.adding(key: "id", value: id)
-        map = map.adding(key: "type", value: type)
-        map = map.adding(key: "controller", value: controller)
-        map = map.adding(key: "publicKeyMultibase", value: publicKeyMultibase)
+        map.append(key: "id", value: id)
+        map.append(key: "type", value: type)
+        map.append(key: "controller", value: controller)
+        map.append(key: "publicKeyMultibase", value: publicKeyMultibase)
         return map
     }
 }

@@ -8,6 +8,19 @@ import XCTest
 final class AuthContinuityTests: XCTestCase {
     private let did = "did:plc:authcontinuity"
     private let gatewayURL = URL(string: "https://gateway.example")!
+    private var backend: GroupAwareInMemorySecureStorage!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        backend = GroupAwareInMemorySecureStorage()
+        KeychainManager._setStorageOverride(backend)
+    }
+
+    override func tearDown() async throws {
+        KeychainManager._setStorageOverride(nil)
+        backend = nil
+        try await super.tearDown()
+    }
 
     private func makeClient(namespace: String) async throws -> (ATProtoClient, KeychainStorage) {
         let storage = KeychainStorage(namespace: namespace)
@@ -230,7 +243,8 @@ final class AuthContinuityTests: XCTestCase {
             gatewayBaseURL: gatewayURL
         )
         let requestURL = gatewayURL.appendingPathComponent("xrpc/example")
-        let request = URLRequest(url: requestURL)
+        var request = URLRequest(url: requestURL)
+        request.setValue("Bearer gateway-session", forHTTPHeaderField: "Authorization")
         let response = try XCTUnwrap(HTTPURLResponse(
             url: requestURL,
             statusCode: 401,
@@ -259,6 +273,68 @@ final class AuthContinuityTests: XCTestCase {
         let after = await manager.authContinuitySnapshot()
         XCTAssertNil(after.did)
         XCTAssertGreaterThan(after.generation, before.generation)
+    }
+
+    func testProxiedUpstreamUnauthorizedReturnsBodyInsteadOfDemandingLogin() async throws {
+        let namespace = "test.auth-continuity.proxied-401.\(UUID().uuidString)"
+        let storage = KeychainStorage(namespace: namespace)
+        let account = Account(did: did, handle: "continuity.example", pdsURL: gatewayURL)
+        let accountManager = MockAccountManager(account: account)
+        try await storage.saveGatewaySession("gateway-session", for: did)
+        let manager = try AuthManager(
+            mode: .gateway,
+            storage: storage,
+            accountManager: accountManager,
+            networkService: NetworkService(baseURL: gatewayURL),
+            oauthConfig: OAuthConfig(
+                clientId: "https://client.example/client-metadata.json",
+                redirectUri: "blue.catbird:/oauth/callback",
+                scope: "atproto"
+            ),
+            didResolver: MockDIDResolver(),
+            gatewayBaseURL: gatewayURL
+        )
+        let requestURL = gatewayURL.appendingPathComponent("xrpc/blue.catbird.chat.getOwnDevices")
+        var request = URLRequest(url: requestURL)
+        request.setValue(
+            "did:web:chat.catbird.blue#atproto_mls", forHTTPHeaderField: "atproto-proxy"
+        )
+        request.setValue("Bearer gateway-session", forHTTPHeaderField: "Authorization")
+        let response = try XCTUnwrap(HTTPURLResponse(
+            url: requestURL,
+            statusCode: 401,
+            httpVersion: nil,
+            headerFields: nil
+        ))
+
+        let before = await manager.authContinuitySnapshot()
+
+        // `DeviceNotRegistered` is defined to start automatic device enrollment, so the
+        // body must reach the caller. Collapsing it into `authenticationRequired`
+        // strands the account permanently: logging in again never enrolls a device.
+        let body = Data(#"{"error":"DeviceNotRegistered","message":"DeviceNotRegistered"}"#.utf8)
+        let (returnedBody, returnedResponse) = try await manager.handleUnauthorizedResponse(
+            response, data: body, for: request
+        )
+        XCTAssertEqual(returnedBody, body)
+        XCTAssertEqual(returnedResponse.statusCode, 401)
+
+        let afterUpstream = await manager.authContinuitySnapshot()
+        XCTAssertEqual(afterUpstream, before)
+        XCTAssertEqual(afterUpstream.generation, before.generation)
+
+        // A genuine session failure must still terminate, even on a proxied request.
+        do {
+            _ = try await manager.handleUnauthorizedResponse(
+                response, data: Data(#"{"error":"invalid_session"}"#.utf8), for: request
+            )
+            XCTFail("Expected terminal gateway authentication error")
+        } catch {
+            XCTAssertTrue(error is ConfidentialGatewayStrategy.GatewayError)
+        }
+        let afterTerminal = await manager.authContinuitySnapshot()
+        XCTAssertNil(afterTerminal.did)
+        XCTAssertGreaterThan(afterTerminal.generation, before.generation)
     }
 
     func testSwitchModeNeverAuthorizesNewModeUnderOldContinuity() async throws {
@@ -832,6 +908,51 @@ final class AuthContinuityTests: XCTestCase {
         try await storage.deleteGatewaySession(for: did)
         let afterSessionDelete = await recorder.count
         XCTAssertEqual(afterSessionDelete, 6)
+    }
+
+    func testRecipientAndOriginCredentialAttachmentRegression() async throws {
+        // Step 1: Exact-origin and recipient policy checks
+        let authorizedURL = URL(string: "https://pds.example.com:443/xrpc/app.bsky.actor.getProfile")!
+        let origin = try XCTUnwrap(ExactAuthRequestOrigin(authorizedURL))
+        XCTAssertEqual(origin.scheme, "https")
+        XCTAssertEqual(origin.host, "pds.example.com")
+        XCTAssertEqual(origin.effectivePort, 443)
+
+        let authedPolicy = RequestSecurityPolicy.authenticated(recipient: origin)
+        if case let .authenticated(recipient) = authedPolicy {
+            XCTAssertEqual(recipient, origin)
+        } else {
+            XCTFail("Expected authenticated policy with matching recipient")
+        }
+
+        let unauthedPolicy = RequestSecurityPolicy.unauthenticated
+        if case .unauthenticated = unauthedPolicy {
+            // expected
+        } else {
+            XCTFail("Expected unauthenticated policy")
+        }
+
+        // Cross-origin comparison
+        let crossOriginURL = URL(string: "https://other.example.com/xrpc/test")!
+        let crossOrigin = try XCTUnwrap(ExactAuthRequestOrigin(crossOriginURL))
+        XCTAssertNotEqual(origin, crossOrigin)
+
+        // Cleartext HTTP / WS rejection for non-loopback
+        let httpURL = URL(string: "http://pds.example.com/xrpc/test")!
+        XCTAssertNil(ExactAuthRequestOrigin(httpURL))
+        let wsURL = URL(string: "ws://pds.example.com/xrpc/test")!
+        XCTAssertNil(ExactAuthRequestOrigin(wsURL))
+
+        // Special-use and IPv4-mapped IPv6 rejection
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("127.0.0.1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("10.0.0.1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("169.254.1.1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("::ffff:127.0.0.1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("::ffff:10.0.0.1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("::ffff:7f00:1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("fe80::1"))
+        XCTAssertTrue(IPAddress.isPrivateOrReservedAddress("fc00::1"))
+        XCTAssertFalse(IPAddress.isPrivateOrReservedAddress("93.184.216.34"))
     }
 }
 

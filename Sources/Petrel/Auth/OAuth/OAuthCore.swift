@@ -5,18 +5,12 @@
 //  Extracted from PublicOAuthStrategy to enable reuse by CABOAuthStrategy.
 //
 
-#if canImport(CryptoKit)
-    import CryptoKit
-#else
-    @preconcurrency import Crypto
-#endif
+import Crypto
 import Foundation
 #if canImport(FoundationNetworking)
     import FoundationNetworking
 #endif
-import JSONWebAlgorithms
-import JSONWebKey
-import JSONWebSignature
+import PetrelCrypto
 
 /// Shared OAuth machinery (DPoP, PKCE, nonce tracking, metadata fetching,
 /// refresh coordination with deduplication & circuit breaking).
@@ -50,6 +44,25 @@ actor OAuthCore {
     /// When each DID's persisted JKT-scoped nonces were last merged into
     /// `noncesByThumbprint`. Bounds how often a proof re-reads the keychain.
     var lastPersistedNonceMerge: [String: Date] = [:]
+
+    /// Cached DPoP key and precomputed proof material per DID. Swift Crypto
+    /// 3.x's immutable P-256 key lacks a Linux `Sendable` annotation.
+    struct DPoPMaterial: @unchecked Sendable {
+        let privateKey: P256.Signing.PrivateKey
+        let jwk: JWK
+        let thumbprint: String
+        let headerBase64: String
+    }
+    private var dpopMaterialCache: [String: DPoPMaterial] = [:]
+    private var activeDPoPLoadTasks: [String: (generation: UInt64, task: Task<DPoPMaterial, Error>)] = [:]
+    /// Token for the DPoP key mutation observer. Initialized during init and cleaned up in deinit.
+    private nonisolated(unsafe) var dpopKeyObserverToken: UUID?
+    /// Test-only hook invoked when entering the coalesced-waiter branch of `getOrCreateDPoPMaterial`.
+    var onCoalescedDPoPWaiterAwaited: (@Sendable () -> Void)?
+    private let encoder = JSONEncoder()
+    private let decoder = JSONDecoder()
+
+
 
     /// Which thumbprints hold cached nonces for which DID, so one account's logout
     /// clears exactly its own entries. Thumbprints are per-DID (each account has its
@@ -92,9 +105,6 @@ actor OAuthCore {
     func setPerformActualRefresh(_ closure: @escaping @Sendable (Account, Session) async throws -> TokenRefreshResult) {
         performActualRefresh = closure
     }
-
-    // MARK: - Initialization
-
     init(
         storage: KeychainStorage,
         accountManager: AccountManaging,
@@ -107,7 +117,25 @@ actor OAuthCore {
         self.networkService = networkService
         self.oauthConfig = oauthConfig
         self.didResolver = didResolver
+
+        // Register synchronously on init so no storage mutation event can be missed
+        self.dpopKeyObserverToken = KeychainStorage.dpopKeyMutationHub.addObserver { [weak self] did in
+            guard let self else { return }
+            if let did {
+                await self.clearDPoPKeyCache(for: did)
+            } else {
+                await self.clearAllDPoPKeyCaches()
+            }
+        }
     }
+
+    deinit {
+        if let token = dpopKeyObserverToken {
+            KeychainStorage.dpopKeyMutationHub.removeObserver(token)
+        }
+    }
+
+
 
     // MARK: - PKCE Helpers
 
@@ -125,10 +153,7 @@ actor OAuthCore {
     // MARK: - Encoding Helpers
 
     func base64URLEncode(_ data: Data) -> String {
-        data.base64EncodedString()
-            .replacingOccurrences(of: "+", with: "-")
-            .replacingOccurrences(of: "/", with: "_")
-            .replacingOccurrences(of: "=", with: "")
+        JWTBase64URL.encode(data)
     }
 
     func encodeFormData(_ params: [String: String]) -> Data {
@@ -202,23 +227,125 @@ actor OAuthCore {
 
     func createJWK(from privateKey: P256.Signing.PrivateKey) throws -> JWK {
         let publicKey = privateKey.publicKey
-        let x = publicKey.x963Representation.dropFirst().prefix(32)
-        let y = publicKey.x963Representation.suffix(32)
-        return JWK(keyType: .ellipticCurve, curve: .p256, x: x, y: y)
+        let x963 = publicKey.x963Representation
+        let x = x963.dropFirst().prefix(32)
+        let y = x963.suffix(32)
+        return JWK(
+            x: JWTBase64URL.encode(Data(x)),
+            y: JWTBase64URL.encode(Data(y))
+        )
     }
 
     func calculateJWKThumbprint(jwk: JWK) throws -> String {
-        let canonicalJWK: [String: String] = [
-            "crv": "P-256",
-            "kty": "EC",
-            "x": jwk.x?.base64URLEscaped() ?? "",
-            "y": jwk.y?.base64URLEscaped() ?? "",
-        ]
-        let jsonString = "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"\(canonicalJWK["x"]!)\",\"y\":\"\(canonicalJWK["y"]!)\"}"
-        let jsonData = Data(jsonString.utf8)
+        let canonicalJSON = "{\"crv\":\"P-256\",\"kty\":\"EC\",\"x\":\"\(jwk.x)\",\"y\":\"\(jwk.y)\"}"
+        let jsonData = Data(canonicalJSON.utf8)
         let hash = SHA256.hash(data: jsonData)
-        return Data(hash).base64URLEscaped()
+        return JWTBase64URL.encode(Data(hash))
     }
+
+    func precomputeDPoPMaterial(for privateKey: P256.Signing.PrivateKey) throws -> DPoPMaterial {
+        let jwk = try createJWK(from: privateKey)
+        let thumbprint = try calculateJWKThumbprint(jwk: jwk)
+        let header = DPoPHeader(jwk: jwk)
+        let headerData = try encoder.encode(header)
+        let headerBase64 = JWTBase64URL.encode(headerData)
+        return DPoPMaterial(
+            privateKey: privateKey,
+            jwk: jwk,
+            thumbprint: thumbprint,
+            headerBase64: headerBase64
+        )
+    }
+
+    /// A mutation can invalidate a load while the load itself is creating the key.
+    /// Three retries cover ordinary replacement races without allowing a persistently
+    /// failing store to spin forever.
+    private static let maxDPoPGenerationMismatchRetries = 3
+
+    func getOrCreateDPoPMaterial(for did: String) async throws -> DPoPMaterial {
+        var generationMismatchRetries = 0
+        while true {
+            if let cached = dpopMaterialCache[did] {
+                return cached
+            }
+            let currentGen = KeychainStorage.dpopKeyMutationHub.generation(for: did)
+            if let entry = activeDPoPLoadTasks[did], entry.generation == currentGen {
+                onCoalescedDPoPWaiterAwaited?()
+                do {
+                    let material = try await entry.task.value
+                    if KeychainStorage.dpopKeyMutationHub.generation(for: did) == currentGen {
+                        return material
+                    }
+                    continue
+                } catch {
+                    if KeychainStorage.dpopKeyMutationHub.generation(for: did) != currentGen {
+                        generationMismatchRetries += 1
+                        if generationMismatchRetries > Self.maxDPoPGenerationMismatchRetries {
+                            throw error
+                        }
+                        continue
+                    }
+                    throw error
+                }
+            }
+
+            let loadGen = currentGen
+            let loadTask = Task<DPoPMaterial, Error> {
+                let key = try await self.fetchOrGenerateDPoPKey(for: did)
+                return try self.precomputeDPoPMaterial(for: key)
+            }
+            activeDPoPLoadTasks[did] = (generation: loadGen, task: loadTask)
+
+            do {
+                let material = try await loadTask.value
+                if KeychainStorage.dpopKeyMutationHub.generation(for: did) == loadGen {
+                    if activeDPoPLoadTasks[did]?.generation == loadGen {
+                        activeDPoPLoadTasks.removeValue(forKey: did)
+                    }
+                    dpopMaterialCache[did] = material
+                    return material
+                }
+                continue
+            } catch {
+                if activeDPoPLoadTasks[did]?.generation == loadGen {
+                    activeDPoPLoadTasks.removeValue(forKey: did)
+                }
+                if KeychainStorage.dpopKeyMutationHub.generation(for: did) != loadGen {
+                    generationMismatchRetries += 1
+                    if generationMismatchRetries > Self.maxDPoPGenerationMismatchRetries {
+                        throw error
+                    }
+                    continue
+                }
+                throw error
+            }
+        }
+    }
+
+    /// Injects a test hook invoked whenever a concurrent caller awaits an active in-flight load task.
+    func setCoalescedWaiterHook(_ hook: (@Sendable () -> Void)?) {
+        self.onCoalescedDPoPWaiterAwaited = hook
+    }
+
+    func clearDPoPKeyCache(for did: String) {
+        dpopMaterialCache.removeValue(forKey: did)
+        if let entry = activeDPoPLoadTasks.removeValue(forKey: did) {
+            entry.task.cancel()
+        }
+    }
+
+    func clearAllDPoPKeyCaches() {
+        dpopMaterialCache.removeAll()
+        for did in Array(activeDPoPLoadTasks.keys) {
+            if let entry = activeDPoPLoadTasks.removeValue(forKey: did) {
+                entry.task.cancel()
+            }
+        }
+    }
+
+
+
+
 
     // MARK: - DPoP Proof Creation
 
@@ -231,22 +358,50 @@ actor OAuthCore {
         ephemeralKeyRawRepresentation: Data? = nil,
         nonce: String? = nil
     ) async throws -> String {
+        let (proof, _) = try await createDPoPProofWithMaterial(
+            for: method,
+            url: url,
+            type: type,
+            accessToken: accessToken,
+            did: did,
+            ephemeralKeyRawRepresentation: ephemeralKeyRawRepresentation,
+            nonce: nonce
+        )
+        return proof
+    }
+
+    func createDPoPProofWithMaterial(
+        for method: String,
+        url: String,
+        type: DPoPProofType,
+        accessToken: String? = nil,
+        did: String? = nil,
+        ephemeralKeyRawRepresentation: Data? = nil,
+        nonce: String? = nil
+    ) async throws -> (proof: String, thumbprint: String) {
         var targetDID: String? = did
         if targetDID == nil {
             targetDID = await accountManager.getCurrentAccount()?.did
         }
 
         let privateKey: P256.Signing.PrivateKey
+        let keyThumbprint: String
+        let headerBase64: String
+
         if let keyData = ephemeralKeyRawRepresentation {
-            privateKey = try P256.Signing.PrivateKey(rawRepresentation: keyData)
+            let key = try P256.Signing.PrivateKey(rawRepresentation: keyData)
+            let material = try precomputeDPoPMaterial(for: key)
+            privateKey = material.privateKey
+            keyThumbprint = material.thumbprint
+            headerBase64 = material.headerBase64
         } else if let currentDID = targetDID {
-            privateKey = try await getOrCreateDPoPKey(for: currentDID)
+            let material = try await getOrCreateDPoPMaterial(for: currentDID)
+            privateKey = material.privateKey
+            keyThumbprint = material.thumbprint
+            headerBase64 = material.headerBase64
         } else {
             throw AuthError.noActiveAccount
         }
-
-        let jwk = try createJWK(from: privateKey)
-        let keyThumbprint = try calculateJWKThumbprint(jwk: jwk)
 
         var ath: String?
         if type == .resourceAccess, let token = accessToken {
@@ -300,23 +455,21 @@ actor OAuthCore {
             nonce: finalNonce
         )
 
-        let jwtPayloadData = try JSONEncoder().encode(payload)
+        let jwtPayloadData = try encoder.encode(payload)
+        let payloadBase64 = JWTBase64URL.encode(jwtPayloadData)
+        let signingInput = "\(headerBase64).\(payloadBase64)"
+        let signatureBytes = try P256WireSignature.sign(Data(signingInput.utf8), using: privateKey)
+        let signatureBase64 = JWTBase64URL.encode(signatureBytes)
 
-        let header = DefaultJWSHeaderImpl(
-            algorithm: .ES256,
-            jwk: jwk, type: "dpop+jwt"
-        )
-        let headerData = try JSONEncoder().encode(header)
-        let headerBase64 = headerData.base64URLEscaped()
-
-        let signingInput = "\(headerBase64).\(base64URLEncode(jwtPayloadData))"
-        let signatureData = try privateKey.signature(for: Data(signingInput.utf8))
-        let signatureBase64 = base64URLEncode(signatureData.rawRepresentation)
-
-        return "\(headerBase64).\(base64URLEncode(jwtPayloadData)).\(signatureBase64)"
+        let proof = "\(headerBase64).\(payloadBase64).\(signatureBase64)"
+        return (proof, keyThumbprint)
     }
 
     func getOrCreateDPoPKey(for did: String) async throws -> P256.Signing.PrivateKey {
+        try await getOrCreateDPoPMaterial(for: did).privateKey
+    }
+
+    private func fetchOrGenerateDPoPKey(for did: String) async throws -> P256.Signing.PrivateKey {
         do {
             if let representation = try await storage.getDPoPKeyRepresentation(for: did) {
                 return try P256.Signing.PrivateKey(x963Representation: representation)
@@ -345,6 +498,8 @@ actor OAuthCore {
         try await storage.saveDPoPKeyRepresentation(newKey.x963Representation, for: did)
         return newKey
     }
+
+
 
     /// Records `nonce` in every store `createDPoPProof` reads for `did`: the in-memory
     /// JKT map, the persisted JKT-scoped map, and the persisted DID-scoped map.
@@ -420,8 +575,8 @@ actor OAuthCore {
     /// (e.g. a locked keychain) — the nonce stores are keyed by it.
     private func dpopKeyThumbprint(for did: String) async -> String? {
         do {
-            let key = try await getOrCreateDPoPKey(for: did)
-            return try calculateJWKThumbprint(jwk: createJWK(from: key))
+            let material = try await getOrCreateDPoPMaterial(for: did)
+            return material.thumbprint
         } catch {
             LogManager.logError(
                 "Failed to derive DPoP key thumbprint for DID: \(LogManager.logDID(did)): \(error)",
@@ -430,6 +585,7 @@ actor OAuthCore {
             return nil
         }
     }
+
 
     /// Applies a server-issued nonce for `domain` to all of `did`'s nonce stores.
     /// - Returns: `false` when the write could not reach the JKT-scoped stores, so a
@@ -477,7 +633,9 @@ actor OAuthCore {
         thumbprintsByDID.removeValue(forKey: did)
         lastPersistedNonceMerge.removeValue(forKey: did)
         didsWithUnpersistedNonces.remove(did)
+        clearDPoPKeyCache(for: did)
     }
+
 
     /// Upper bound on the number of in-flight OAuth flows holding a nonce. Flows are
     /// short-lived and user-driven, so anything past this is abandoned logins whose
@@ -557,7 +715,7 @@ actor OAuthCore {
         for attempt in 1 ... maxRetries {
             do {
                 let (data, _) = try await networkService.request(request)
-                return try JSONDecoder().decode(ProtectedResourceMetadata.self, from: data)
+                return try decoder.decode(ProtectedResourceMetadata.self, from: data)
             } catch {
                 lastError = error
                 if attempt < maxRetries {
@@ -581,7 +739,7 @@ actor OAuthCore {
         for attempt in 1 ... maxRetries {
             do {
                 let (data, _) = try await networkService.request(request)
-                return try JSONDecoder().decode(AuthorizationServerMetadata.self, from: data)
+                return try decoder.decode(AuthorizationServerMetadata.self, from: data)
             } catch {
                 lastError = error
                 if attempt < maxRetries {
@@ -676,9 +834,8 @@ actor OAuthCore {
         let (data, response) = try await networkService.request(request)
 
         guard let httpResponse = response as? HTTPURLResponse else { throw AuthError.invalidResponse }
-
         if (200 ... 299).contains(httpResponse.statusCode) {
-            guard let parResponse = try? JSONDecoder().decode(PARResponse.self, from: data) else {
+            guard let parResponse = try? decoder.decode(PARResponse.self, from: data) else {
                 throw AuthError.invalidResponse
             }
             let requestURI = parResponse.requestURI
@@ -692,7 +849,7 @@ actor OAuthCore {
         } else if httpResponse.statusCode == 400 {
             let dpopNonceHeader = extractNonceFromHeaders(httpResponse.allHeaderFields)
             var isNonceError = false
-            if let errorResponse = try? JSONDecoder().decode(OAuthErrorResponse.self, from: data),
+            if let errorResponse = try? decoder.decode(OAuthErrorResponse.self, from: data),
                errorResponse.error == "use_dpop_nonce"
             {
                 isNonceError = true
@@ -719,7 +876,7 @@ actor OAuthCore {
                 }
 
                 if (200 ... 299).contains(retryHttpResponse.statusCode) {
-                    guard let parResponse = try? JSONDecoder().decode(PARResponse.self, from: retryData) else {
+                    guard let parResponse = try? decoder.decode(PARResponse.self, from: retryData) else {
                         throw AuthError.invalidResponse
                     }
                     let parNonce = extractNonceFromHeaders(retryHttpResponse.allHeaderFields)
@@ -730,14 +887,31 @@ actor OAuthCore {
                     }
                     return (parResponse.requestURI, parNonce)
                 } else {
-                    throw AuthError.authorizationFailed
+                    throw parseOAuthError(from: retryData, statusCode: retryHttpResponse.statusCode)
                 }
             } else {
-                throw AuthError.authorizationFailed
+                throw parseOAuthError(from: data, statusCode: httpResponse.statusCode)
             }
         } else {
-            throw AuthError.authorizationFailed
+            throw parseOAuthError(from: data, statusCode: httpResponse.statusCode)
         }
+    }
+
+    private func parseOAuthError(from data: Data, statusCode: Int) -> AuthError {
+        if let errorResponse = try? JSONDecoder().decode(OAuthErrorResponse.self, from: data) {
+            let desc = errorResponse.errorDescription ?? ""
+            let isNativeNone = (errorResponse.error == "invalid_client_metadata" || errorResponse.error == "invalid_client")
+                && (desc.localizedCaseInsensitiveContains("none method")
+                    || desc.localizedCaseInsensitiveContains("must authenticate using none")
+                    || (desc.localizedCaseInsensitiveContains("native") && desc.localizedCaseInsensitiveContains("none")))
+            if isNativeNone {
+                return .nativeClientNoneAuthRequired(errorResponse.errorDescription)
+            } else if errorResponse.error == "invalid_client_metadata" {
+                return .invalidClientMetadata(errorResponse.errorDescription)
+            }
+            return .serverError(statusCode, "\(errorResponse.error): \(desc)")
+        }
+        return .authorizationFailed
     }
 
     func revokeToken(refreshToken: String, endpoint: String, did: String) async {
@@ -798,8 +972,8 @@ actor OAuthCore {
         let isTokenEndpoint = account.authorizationServerMetadata?.tokenEndpoint == request.url?.absoluteString
         let type: DPoPProofType = isTokenEndpoint ? .tokenRequest : .resourceAccess
 
-        // Generate DPoP
-        let proof = try await createDPoPProof(
+        // Generate DPoP and obtain its thumbprint atomically from the same material
+        let (proof, thumbprint) = try await createDPoPProofWithMaterial(
             for: request.httpMethod ?? "GET",
             url: request.url?.absoluteString ?? "",
             type: type,
@@ -812,12 +986,8 @@ actor OAuthCore {
             req.setValue("DPoP \(session.accessToken)", forHTTPHeaderField: "Authorization")
         }
 
-        // Get JKT for context
-        let key = try await getOrCreateDPoPKey(for: account.did)
-        let jwk = try createJWK(from: key)
-        let thumbprint = try calculateJWKThumbprint(jwk: jwk)
-
         return (req, AuthContext(did: account.did, jkt: thumbprint))
+
     }
 
     // MARK: - Refresh Coordination
@@ -934,6 +1104,40 @@ actor OAuthCore {
                 "CRITICAL: refreshed session for DID: \(LogManager.logDID(did)) could not be persisted at all; holding in memory only. Error: \(error)"
             )
         }
+    }
+}
+
+/// Minimal ES256 JWK representation for DPoP proof headers and RFC 7638 thumbprints.
+struct JWK: Codable, Sendable, Equatable {
+    let kty: String
+    let crv: String
+    let x: String
+    let y: String
+
+    init(x: String, y: String) {
+        self.kty = "EC"
+        self.crv = "P-256"
+        self.x = x
+        self.y = y
+    }
+
+    init(kty: String = "EC", crv: String = "P-256", x: String, y: String) {
+        self.kty = kty
+        self.crv = crv
+        self.x = x
+        self.y = y
+    }
+}
+
+private struct DPoPHeader: Codable, Sendable {
+    let typ: String
+    let alg: String
+    let jwk: JWK
+
+    init(jwk: JWK) {
+        self.typ = "dpop+jwt"
+        self.alg = "ES256"
+        self.jwk = jwk
     }
 }
 

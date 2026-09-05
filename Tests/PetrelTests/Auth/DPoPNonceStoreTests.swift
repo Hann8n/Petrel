@@ -487,7 +487,127 @@ struct DPoPNonceStoreTests {
                 ephemeralKeyRawRepresentation: secondKey.rawRepresentation
             )
             #expect(try nonceInProofString(firstProof) == "first-flow-nonce")
+
             #expect(try nonceInProofString(secondProof) == "second-flow-nonce")
+        }
+    }
+    @Test("A persistently failing DPoP key store surfaces its storage error")
+    func persistentDPoPKeyStoreFailurePropagates() async throws {
+        let backend = InMemorySecureStorage()
+        try await withInMemoryStorage(backend) {
+            let storage = KeychainStorage(namespace: "test.dpop.store-failure")
+            let core = makeCore(storage: storage)
+            backend.failStoreMatching = { $0 == "dpopKey.\(Self.did)" }
+
+            do {
+                _ = try await core.getOrCreateDPoPKey(for: Self.did)
+                Issue.record("Expected DPoP key creation to throw")
+            } catch let error as KeychainError {
+                guard case .itemStoreError(status: -1) = error else {
+                    Issue.record("Unexpected storage error: \(error)")
+                    return
+                }
+            } catch {
+                Issue.record("Unexpected error: \(error)")
+            }
+        }
+    }
+    @Test("DPoP key and proof material are cached and invalidated on key clear")
+    func dpopMaterialCachingAndInvalidation() async throws {
+        let backend = InMemorySecureStorage()
+        try await withInMemoryStorage(backend) {
+            let storage = KeychainStorage(namespace: "test.dpop.cache")
+            let core = makeCore(storage: storage)
+            let did = Self.did
+
+            let key1 = P256.Signing.PrivateKey()
+            try await storage.saveDPoPKeyRepresentation(key1.x963Representation, for: did)
+
+            // First fetch populates cache
+            let material1 = try await core.getOrCreateDPoPMaterial(for: did)
+            #expect(material1.privateKey.rawRepresentation == key1.rawRepresentation)
+
+            // Modify backend directly without notifying cache: cache hit returns material1
+            let key2 = P256.Signing.PrivateKey()
+            backend.plant(
+                key: "dpopKey.\(did)",
+                namespace: "dpopkeys",
+                data: key2.x963Representation
+            )
+
+            let cachedMaterial = try await core.getOrCreateDPoPMaterial(for: did)
+            #expect(cachedMaterial.privateKey.rawRepresentation == key1.rawRepresentation)
+
+            // Clear cache for did: next read retrieves key2 from storage
+            await core.clearDPoPKeyCache(for: did)
+            let freshMaterial = try await core.getOrCreateDPoPMaterial(for: did)
+            #expect(freshMaterial.privateKey.rawRepresentation == key2.rawRepresentation)
+        }
+    }
+
+    @Test("Coalesced waiters reject material invalidated during retrieval")
+    func invalidationDuringCoalescedLoadRejectsStaleMaterial() async throws {
+        let backend = InMemorySecureStorage()
+        let gate = RetrievalGate()
+        defer { gate.release() }
+        try await withInMemoryStorage(backend) {
+            let reader = KeychainStorage(namespace: "test.dpop.race")
+            let mutator = KeychainStorage(namespace: "test.dpop.race")
+            let core = makeCore(storage: reader)
+            let did = Self.did
+            let key1 = P256.Signing.PrivateKey()
+            let key2 = P256.Signing.PrivateKey()
+            try await mutator.saveDPoPKey(key1, for: did)
+
+            let coalescedWaiterReached = AsyncBarrier()
+            await core.setCoalescedWaiterHook {
+                coalescedWaiterReached.signal()
+            }
+
+            backend.retrieveGate = gate
+            let first = Task { try await core.getOrCreateDPoPMaterial(for: did) }
+            try await gate.waitUntilHeld()
+
+            let second = Task { try await core.getOrCreateDPoPMaterial(for: did) }
+            let enteredCoalescedBranch = try await coalescedWaiterReached.wait(timeoutNanoseconds: 2_000_000_000, onTimeout: {
+                gate.release()
+            })
+            #expect(enteredCoalescedBranch, "Expected second task to enter coalesced-waiter branch before mutation")
+            guard enteredCoalescedBranch else { return }
+            try await mutator.saveDPoPKey(key2, for: did)
+            gate.release()
+            let firstMaterial = try await first.value
+            let secondMaterial = try await second.value
+            #expect(firstMaterial.privateKey.rawRepresentation == key2.rawRepresentation)
+            #expect(secondMaterial.privateKey.rawRepresentation == key2.rawRepresentation)
+        }
+    }
+    @Test("KeychainStorage DPoP key mutations synchronously invalidate OAuthCore cache without sleep")
+    func storageMutationsInvalidateCache() async throws {
+        let backend = InMemorySecureStorage()
+        try await withInMemoryStorage(backend) {
+            let storage = KeychainStorage(namespace: "test.dpop.mutation-hub")
+            let core = makeCore(storage: storage)
+            let did = Self.did
+
+            let key1 = P256.Signing.PrivateKey()
+            try await storage.saveDPoPKey(key1, for: did)
+
+            let mat1 = try await core.getOrCreateDPoPMaterial(for: did)
+            #expect(mat1.privateKey.rawRepresentation == key1.rawRepresentation)
+
+            // Mutate key through KeychainStorage API directly - must be immediately visible without sleep
+            let key2 = P256.Signing.PrivateKey()
+            try await storage.saveDPoPKey(key2, for: did)
+
+            let mat2 = try await core.getOrCreateDPoPMaterial(for: did)
+            #expect(mat2.privateKey.rawRepresentation == key2.rawRepresentation)
+
+            // Delete key through KeychainStorage API directly - must be immediately visible without sleep
+            try await storage.deleteDPoPKey(for: did)
+            // Deletion must invalidate OAuthCore, not merely remove persisted bytes.
+            let replacement = try await core.getOrCreateDPoPKey(for: did)
+            #expect(replacement.rawRepresentation != key2.rawRepresentation)
         }
     }
 }

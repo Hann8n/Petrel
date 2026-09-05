@@ -5,7 +5,7 @@ public struct Input: ATProtocolCodable {
 
         /// Standard public initializer
         public init({% for prop in properties -%}
-            {{ prop.name|sanitizeKeyword }}: {{ prop.type }}{% if prop.optional %}? = nil{% endif %}{% if not loop.last %}, {% endif %}
+            {{ prop.name|sanitizeKeyword }}: {{ prop.type }}{% if prop.optional %}?{% if prop.wire_optional %} = nil{% endif %}{% endif %}{% if not loop.last %}, {% endif %}
         {%- endfor %}) {
             {%- for prop in properties %}
             self.{{ prop.name|sanitizeKeyword }} = {{ prop.name|sanitizeKeyword }}
@@ -85,18 +85,18 @@ public struct Input: ATProtocolCodable {
             {% if prop.required_nullable -%}
             if let value = {{ prop.name|sanitizeKeyword }} {
                 let {{ prop.name }}Value = try value.toCBORValue()
-                map = map.adding(key: "{{ prop.name }}", value: {{ prop.name }}Value)
+                map = map.adding(key: "{{ prop.name | escapeStringLiteral }}", value: {{ prop.name }}Value)
             } else {
-                map = map.adding(key: "{{ prop.name }}", value: NSNull())
+                map = map.adding(key: "{{ prop.name | escapeStringLiteral }}", value: NSNull())
             }
             {%- elif prop.optional -%}
             if let value = {{ prop.name|sanitizeKeyword }} {
                 let {{ prop.name }}Value = try value.toCBORValue()
-                map = map.adding(key: "{{ prop.name }}", value: {{ prop.name }}Value)
+                map = map.adding(key: "{{ prop.name | escapeStringLiteral }}", value: {{ prop.name }}Value)
             }
             {%- else -%}
             let {{ prop.name }}Value = try {{ prop.name|sanitizeKeyword }}.toCBORValue()
-            map = map.adding(key: "{{ prop.name }}", value: {{ prop.name }}Value)
+            map = map.adding(key: "{{ prop.name | escapeStringLiteral }}", value: {{ prop.name }}Value)
             {%- endif %}
             {%- endfor %}
             return map

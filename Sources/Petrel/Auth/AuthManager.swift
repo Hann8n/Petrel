@@ -199,6 +199,18 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
             bskyChatDID: bskyChatDID
         )
     }
+    func startOAuthFlowWithState(
+        identifier: String? = nil,
+        bskyAppViewDID: String? = nil,
+        bskyChatDID: String? = nil
+    ) async throws -> (url: URL, state: String) {
+        try await activeStrategy.startOAuthFlowWithState(
+            identifier: identifier,
+            bskyAppViewDID: bskyAppViewDID,
+            bskyChatDID: bskyChatDID
+        )
+    }
+
 
     func startOAuthFlowForSignUp(
         pdsURL: URL?,
@@ -265,6 +277,32 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
 
     func attemptRecoveryFromServerFailures(for did: String?) async throws {
         try await activeStrategy.attemptRecoveryFromServerFailures(for: did)
+    }
+
+    func startGatewayScopeUpgrade(
+        requesting: Set<String>,
+        for expectedDID: String,
+        callbackURL: URL = ConfidentialGatewayStrategy.permissionCallbackURL
+    ) async throws -> URL {
+        try await activeStrategy.startGatewayScopeUpgrade(
+            requesting: requesting,
+            for: expectedDID,
+            callbackURL: callbackURL
+        )
+    }
+
+    func completeGatewayScopeUpgrade(
+        callbackURL: URL,
+        for expectedDID: String
+    ) async throws -> Set<String> {
+        return try await activeStrategy.completeGatewayScopeUpgrade(
+            callbackURL: callbackURL,
+            for: expectedDID
+        )
+    }
+
+    func fetchGrantedScopes(for did: String?) async throws -> Set<String> {
+        try await activeStrategy.fetchGrantedScopes(for: did)
     }
 
     /// Returns the exact OAuth scopes granted to an account, read from its

@@ -117,17 +117,22 @@ data class DID(
     }
 
     companion object {
+        private val DID_REGEX = Regex("^did:[a-z]+:[a-zA-Z0-9._:%-]*[a-zA-Z0-9._-]$")
+
+        fun isValidDID(didString: String): Boolean {
+            if (didString.isEmpty() || didString.toByteArray(Charsets.UTF_8).size > 8192) {
+                return false
+            }
+            return DID_REGEX.matches(didString)
+        }
+
         fun parse(didString: String): DID {
-            require(didString.startsWith("did:")) { "Invalid DID format" }
-            require(didString.length > 4) { "Invalid DID: too short" }
-
+            require(isValidDID(didString)) { "Invalid DID format: $didString" }
             val parts = didString.substring(4).split(":")
-            require(parts.size >= 2) { "Invalid DID: missing method or authority" }
-
             return DID(
                 method = parts[0],
-                authority = parts[1],
-                segments = parts.drop(2)
+                authority = if (parts.size > 1) parts[1] else "",
+                segments = if (parts.size > 2) parts.drop(2) else emptyList()
             )
         }
     }
@@ -256,9 +261,19 @@ data class NSID(val authority: String, val name: String) {
     override fun toString(): String = "$authority.$name"
 
     companion object {
+        private val NSID_REGEX =
+            Regex("^([a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\\.([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))+\\.[a-zA-Z][a-zA-Z0-9]{0,62}$")
+
+        fun isValidNSID(nsidString: String): Boolean {
+            if (nsidString.isEmpty() || nsidString.length > 584) {
+                return false
+            }
+            return NSID_REGEX.matches(nsidString)
+        }
+
         fun parse(nsidString: String): NSID {
+            require(isValidNSID(nsidString)) { "Invalid NSID format: $nsidString" }
             val parts = nsidString.split(".")
-            require(parts.size >= 2) { "Invalid NSID format" }
             return NSID(
                 authority = parts.dropLast(1).joinToString("."),
                 name = parts.last()
@@ -440,6 +455,52 @@ object ATProtocolURISerializer : KSerializer<ATProtocolURI> {
     }
 }
 
+// MARK: - Record Key
+
+@Serializable(with = RecordKeySerializer::class)
+class RecordKey private constructor(val value: String) {
+    override fun toString(): String = value
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is RecordKey) return false
+        return value == other.value
+    }
+
+    override fun hashCode(): Int = value.hashCode()
+
+    companion object {
+        private val RECORD_KEY_REGEX = Regex("^[a-zA-Z0-9_.~:-]+$")
+
+        fun isValidRecordKey(key: String): Boolean {
+            if (key.isEmpty() || key.toByteArray(Charsets.UTF_8).size > 512 || key == "." || key == "..") {
+                return false
+            }
+            return RECORD_KEY_REGEX.matches(key)
+        }
+
+        fun create(keyString: String): RecordKey {
+            require(isValidRecordKey(keyString)) { "Invalid record key: $keyString" }
+            return RecordKey(keyString)
+        }
+
+        fun parse(keyString: String): RecordKey = create(keyString)
+    }
+}
+
+object RecordKeySerializer : KSerializer<RecordKey> {
+    override val descriptor: SerialDescriptor =
+        PrimitiveSerialDescriptor("RecordKey", PrimitiveKind.STRING)
+
+    override fun serialize(encoder: Encoder, value: RecordKey) {
+        encoder.encodeString(value.value)
+    }
+
+    override fun deserialize(decoder: Decoder): RecordKey {
+        return RecordKey.create(decoder.decodeString())
+    }
+}
+
 // MARK: - Space Reference
 
 /**
@@ -452,8 +513,78 @@ object ATProtocolURISerializer : KSerializer<ATProtocolURI> {
  * ref does not parse as one.
  */
 @Serializable(with = SpaceRefSerializer::class)
-data class SpaceRef(val value: String) {
+class SpaceRef private constructor(
+    val value: String,
+    val spaceDID: String,
+    val spaceType: String,
+    val skey: String
+) {
+    fun uriString(): String = value
+
     override fun toString(): String = value
+
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is SpaceRef) return false
+        return value == other.value
+    }
+
+    override fun hashCode(): Int = value.hashCode()
+
+    companion object {
+        private val nsidRegex = Regex(
+            "^([a-zA-Z]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)(\\.([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?))+\\.[a-zA-Z][a-zA-Z0-9]{0,62}$"
+        )
+        private val recordKeyRegex = Regex("^[a-zA-Z0-9._:~-]+$")
+
+        fun isValidDID(did: String): Boolean {
+            if (!did.startsWith("did:") || did.length !in 7..2048) return false
+            val rest = did.substring(4)
+            val colonIdx = rest.indexOf(':')
+            if (colonIdx <= 0) return false
+            val method = rest.substring(0, colonIdx)
+            if (!method.all { it in 'a'..'z' }) return false
+            val id = rest.substring(colonIdx + 1)
+            if (id.isEmpty() || id.endsWith(":") || id.endsWith("%")) return false
+            return id.all { (it in 'a'..'z' || it in 'A'..'Z' || it in '0'..'9' || it in "._:%-") }
+        }
+
+        fun isValidNSID(nsid: String): Boolean {
+            if (nsid.isEmpty() || nsid.length > 317) return false
+            return nsidRegex.matches(nsid)
+        }
+
+        fun isValidRecordKey(key: String): Boolean {
+            if (key.isEmpty() || key.length > 512 || key == "." || key == "..") return false
+            return recordKeyRegex.matches(key)
+        }
+
+        fun parse(uriString: String): SpaceRef {
+            require(uriString.startsWith("at://")) { "URI must start with 'at://'" }
+            require(uriString.length <= 8192) { "SpaceRef URI exceeds maximum length of 8192 bytes" }
+            val rest = uriString.substring(5)
+            val segments = rest.split("/")
+            require(segments.size == 4) { "URI must have exactly authority, 'space', spaceType, and skey segments" }
+            val authority = segments[0]
+            require(isValidDID(authority)) { "invalid authority DID '$authority'" }
+            require(segments[1] == "space") { "path segment after authority must be 'space', got '${segments[1]}'" }
+            val spaceType = segments[2]
+            require(isValidNSID(spaceType)) { "invalid spaceType NSID '$spaceType'" }
+            val skey = segments[3]
+            require(isValidRecordKey(skey)) { "invalid skey RecordKey '$skey'" }
+
+            return SpaceRef(
+                value = "at://$authority/space/$spaceType/$skey",
+                spaceDID = authority,
+                spaceType = spaceType,
+                skey = skey
+            )
+        }
+
+        fun create(spaceDID: String, spaceType: String, skey: String): SpaceRef {
+            return parse("at://$spaceDID/space/$spaceType/$skey")
+        }
+    }
 }
 
 object SpaceRefSerializer : KSerializer<SpaceRef> {
@@ -461,10 +592,14 @@ object SpaceRefSerializer : KSerializer<SpaceRef> {
         PrimitiveSerialDescriptor("SpaceRef", PrimitiveKind.STRING)
 
     override fun serialize(encoder: Encoder, value: SpaceRef) {
-        encoder.encodeString(value.value)
+        encoder.encodeString(value.toString())
     }
 
     override fun deserialize(decoder: Decoder): SpaceRef {
-        return SpaceRef(decoder.decodeString())
+        return try {
+            SpaceRef.parse(decoder.decodeString())
+        } catch (e: IllegalArgumentException) {
+            throw SerializationException(e.message, e)
+        }
     }
 }

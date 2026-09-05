@@ -1,4 +1,5 @@
 import json
+import os
 import pathlib
 import re
 import subprocess
@@ -11,9 +12,28 @@ import unittest
 GENERATOR_DIR = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(GENERATOR_DIR))
 
+from cycle_detector import CycleDetector
 from kotlin_code_generator import KotlinCodeGenerator
 from swift_code_generator import SwiftCodeGenerator
 
+
+def _gradle_env():
+    env = os.environ.copy()
+    if sys.platform == "darwin":
+        for version in ("21", "17"):
+            try:
+                res = subprocess.run(
+                    ["/usr/libexec/java_home", "-v", version],
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if res.returncode == 0 and res.stdout.strip():
+                    env["JAVA_HOME"] = res.stdout.strip()
+                    break
+            except Exception:
+                pass
+    return env
 
 CASES = ["prepare", "commit", "abort", "force-commit", "force_abort"]
 ADVERSARIAL_CASES = [
@@ -224,6 +244,7 @@ class ClosedStringEnumGenerationTests(unittest.TestCase):
                     "blue.catbird.petrel.generated.fixture.ClosedEnumGeneratedFixtureTest",
                 ],
                 cwd=GENERATOR_DIR.parent / "kotlin",
+                env=_gradle_env(),
                 capture_output=True,
                 text=True,
             )
@@ -286,6 +307,7 @@ class ClosedStringEnumGenerationTests(unittest.TestCase):
                     "blue.catbird.petrel.generated.NamedRefGeneratedFixtureTest",
                 ],
                 cwd=GENERATOR_DIR.parent / "kotlin",
+                env=_gradle_env(),
                 capture_output=True,
                 text=True,
             )
@@ -530,6 +552,54 @@ class ClosedStringEnumGenerationTests(unittest.TestCase):
 
         self.assertEqual(swift, (fixtures / "known_values_base.swift.golden").read_text())
         self.assertEqual(kotlin, (fixtures / "known_values_base.kt.golden").read_text())
+    def test_cross_lexicon_named_closed_enum_resolves_to_module_path_without_typealiases(self):
+        defs_lexicon = {
+            "lexicon": 1,
+            "id": "blue.catbird.test.defs",
+            "defs": {
+                "accessState": {
+                    "type": "string",
+                    "enum": ["active", "expired", "removed"]
+                }
+            }
+        }
+        consumer_lexicon = {
+            "lexicon": 1,
+            "id": "blue.catbird.test.consumer",
+            "defs": {
+                "main": {
+                    "type": "procedure",
+                    "input": {
+                        "encoding": "application/json",
+                        "schema": {
+                            "type": "object",
+                            "required": ["state"],
+                            "properties": {
+                                "state": {
+                                    "type": "ref",
+                                    "ref": "blue.catbird.test.defs#accessState"
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        detector = CycleDetector()
+        detector.add_type("blue.catbird.test.defs", "accessState", defs_lexicon["defs"]["accessState"])
+
+        swift_defs = SwiftCodeGenerator(defs_lexicon, detector).convert()
+        self.assertNotIn("typealias AccessState", swift_defs)
+
+        swift_consumer = SwiftCodeGenerator(consumer_lexicon, detector).convert()
+        self.assertIn("public let state: BlueCatbirdTestDefs.DefsAccessState", swift_consumer)
+
+        kotlin_defs = KotlinCodeGenerator(defs_lexicon, detector).convert()
+        self.assertNotIn("typealias BlueCatbirdTestDefsAccessState", kotlin_defs)
+
+        kotlin_consumer = KotlinCodeGenerator(consumer_lexicon, detector).convert()
+        self.assertIn("val state: BlueCatbirdTestDefsDefsAccessState", kotlin_consumer)
+
 
     def test_inline_and_named_conflicting_vocabularies_have_distinct_types_and_refs(self):
         swift = SwiftCodeGenerator(conflicting_context_lexicon()).convert()

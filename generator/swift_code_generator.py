@@ -4,16 +4,11 @@ from utils import convert_to_camel_case, lowercase_first_letter
 from templates import TemplateManager
 from enum_generator import EnumGenerator
 from type_converter import TypeConverter
+from base_code_generator import BaseCodeGenerator
 
-class SwiftCodeGenerator:
-    def __init__(self, lexicon: Dict[str, Any], cycle_detector=None, emit_server_contracts=False):
-        self.lexicon = lexicon
-        self.defs = lexicon.get('defs', {})
-        self.lexicon_id = lexicon.get('id', '')
-        self.lexicon_version = lexicon.get('lexicon', 1)
-        top_level_description = lexicon.get('description', '')
-        nested_description = lexicon.get('defs', {}).get('main', {}).get('description', '')
-        self.description = f"{top_level_description} {nested_description}".strip()
+class SwiftCodeGenerator(BaseCodeGenerator):
+    def __init__(self, lexicon: Dict[str, Any], cycle_detector=None, emit_server_contracts=False, emit_xrpc_error_parsing=False):
+        super().__init__(lexicon, cycle_detector)
         self.struct_name = convert_to_camel_case(self.lexicon_id)
         self.conformance = ""
         self.enums = ""
@@ -22,6 +17,7 @@ class SwiftCodeGenerator:
         self.is_blob_upload = self.check_if_blob_upload(lexicon)
         self.cycle_detector = cycle_detector
         self.emit_server_contracts = emit_server_contracts
+        self.emit_xrpc_error_parsing = emit_xrpc_error_parsing
 
         self.token_descriptions = {}
         self.generated_tokens = set()
@@ -40,6 +36,8 @@ class SwiftCodeGenerator:
             else set()
         )
 
+    def get_file_extension(self) -> str:
+        return '.swift'
     def check_if_blob_upload(self, lexicon: Dict[str, Any]) -> bool:
         main_def = lexicon.get('defs', {}).get('main', {})
         encoding = main_def.get('input', {}).get('encoding', '')
@@ -700,6 +698,7 @@ class SwiftCodeGenerator:
             output_encoding=output_encoding,  # Pass the output encoding to the template
             has_errors=bool(main_def.get('errors')),
             struct_name=self.struct_name,
+            emit_xrpc_error_parsing=self.emit_xrpc_error_parsing,
         )
 
     def generate_procedure_function(self, lexicon_id, main_def):
@@ -758,6 +757,7 @@ class SwiftCodeGenerator:
             parameters_struct_name=parameters_struct_name,
             has_errors=bool(main_def.get('errors')),
             struct_name=self.struct_name,
+            emit_xrpc_error_parsing=self.emit_xrpc_error_parsing,
         )
 
     def generate_subscription_function(self, lexicon_id, main_def):

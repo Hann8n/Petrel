@@ -17,6 +17,7 @@ import Testing
 /// refresh-persistence paths without touching the real keychain.
 final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
     enum Operation {
+        case store
         case retrieve
         case delete
     }
@@ -24,6 +25,8 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
     private let lock = NSLock()
     private var items: [String: Data] = [:]
     private var operationObserver: (@Sendable (Operation, String) -> Void)?
+
+
 
     /// Fail the next N store calls (any key), then succeed.
     var storeFailuresRemaining = 0
@@ -34,6 +37,13 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
     var failRetrieveMatching: (@Sendable (String) -> Bool)?
     /// Fail delete calls whose (un-namespaced) key matches this predicate.
     var failDeleteMatching: (@Sendable (String) -> Bool)?
+    /// Hook invoked before store write.
+    var beforeStore: (@Sendable (String) -> Void)?
+    /// Hook invoked before items.removeValue during delete.
+    var beforeDelete: (@Sendable (String) -> Void)?
+    var retrieveGate: RetrievalGate?
+
+
 
     private func fullKey(_ key: String, _ namespace: String) -> String {
         "\(namespace)|\(key)"
@@ -41,16 +51,22 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
 
     func store(key: String, value: Data, namespace: String, accessGroup _: String?) throws {
         lock.lock()
-        defer { lock.unlock() }
-        if let matcher = failStoreMatching, matcher(key) {
+        let beforeHook = beforeStore
+        let shouldFail = failStoreMatching?(key) ?? false
+        let hasFailures = storeFailuresRemaining > 0
+        if hasFailures { storeFailuresRemaining -= 1 }
+        lock.unlock()
+        beforeHook?(key)
+        if shouldFail || hasFailures {
             throw KeychainError.itemStoreError(status: -1)
         }
-        if storeFailuresRemaining > 0 {
-            storeFailuresRemaining -= 1
-            throw KeychainError.itemStoreError(status: -1)
-        }
+        lock.lock()
         items[fullKey(key, namespace)] = value
+        let observer = operationObserver
+        lock.unlock()
+        observer?(.store, key)
     }
+
 
     func retrieve(key: String, namespace: String, accessGroup _: String?) throws -> Data {
         lock.lock()
@@ -58,6 +74,7 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
         let observer = operationObserver
         let shouldFail = failRetrieveMatching?(key) ?? false
         lock.unlock()
+        retrieveGate?.enter()
         observer?(.retrieve, key)
         if shouldFail {
             throw KeychainError.itemRetrievalError(status: -25308)
@@ -68,9 +85,15 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
         return data
     }
 
+
+
     func delete(key: String, namespace: String, accessGroup _: String?) throws {
         lock.lock()
+        let beforeHook = beforeDelete
         let shouldFail = failDeleteMatching?(key) ?? false
+        lock.unlock()
+        beforeHook?(key)
+        lock.lock()
         if !shouldFail {
             items.removeValue(forKey: fullKey(key, namespace))
         }
@@ -105,7 +128,10 @@ final class InMemorySecureStorage: SecureStorage, @unchecked Sendable {
         )
     }
 
-    func deleteDPoPKey(keyTag _: String, accessGroup _: String?) throws {}
+    func deleteDPoPKey(keyTag: String, accessGroup _: String?) throws {
+        try delete(key: keyTag, namespace: "dpopkeys", accessGroup: nil)
+    }
+
 
     /// Plants raw bytes at a storage key, bypassing validation — used to simulate
     /// corrupted keychain entries.

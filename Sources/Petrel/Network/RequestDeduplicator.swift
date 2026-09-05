@@ -15,16 +15,31 @@ import Foundation
 actor RequestDeduplicator {
     // MARK: - Types
 
-    /// Key for identifying unique requests
-    private struct RequestKey: Hashable {
+    /// Key for identifying unique requests (only idempotent exact GET/HEAD, partitioned by auth identity)
+    struct RequestKey: Hashable, Sendable {
+        let authIdentity: String?
         let method: String
         let url: String
-        let bodyHash: Int?
 
-        init(from request: URLRequest) {
-            method = request.httpMethod ?? "GET"
-            url = request.url?.absoluteString ?? ""
-            bodyHash = request.httpBody?.hashValue
+        init?(from request: URLRequest, authIdentity: String? = nil) {
+            guard let httpMethod = request.httpMethod else { return nil }
+            self.init(
+                method: httpMethod,
+                url: request.url?.absoluteString ?? "",
+                authIdentity: authIdentity ?? request.value(forHTTPHeaderField: "Authorization")
+            )
+        }
+
+        init?(method: String, url: String, authIdentity: String? = nil) {
+            guard method == "GET" || method == "HEAD" else {
+                return nil
+            }
+            guard !url.isEmpty else {
+                return nil
+            }
+            self.authIdentity = authIdentity
+            self.method = method
+            self.url = url
         }
     }
 
@@ -61,25 +76,29 @@ actor RequestDeduplicator {
     /// executes at a time. Subsequent identical requests wait for the first to complete.
     /// - Parameters:
     ///   - request: The URLRequest to deduplicate
+    ///   - authIdentity: Optional auth identity (e.g. account DID or authorization token)
     ///   - work: The async work to perform if this is the first request
     /// - Returns: The result of the network request
     func deduplicate(
         request: URLRequest,
+        authIdentity: String? = nil,
         work: @escaping @Sendable () async throws -> (Data, URLResponse)
     ) async throws -> (Data, URLResponse) {
+        guard let key = RequestKey(from: request, authIdentity: authIdentity) else {
+            return try await work()
+        }
+
         // Start cleanup task on first use if needed
         if cleanupTask == nil {
-            cleanupTask = Task {
+            cleanupTask = Task { [weak self] in
                 while !Task.isCancelled {
                     // Wait 30 seconds between cleanup runs
                     try? await Task.sleep(nanoseconds: 30_000_000_000)
-
-                    cleanupExpiredRequests()
+                    guard let self else { break }
+                    await self.cleanupExpiredRequests()
                 }
             }
         }
-
-        let key = RequestKey(from: request)
 
         // Check if there's already an in-flight request
         if let existing = inFlightRequests[key] {
@@ -125,10 +144,14 @@ actor RequestDeduplicator {
     }
 
     /// Checks if a request matching the given URLRequest is currently in flight
-    /// - Parameter request: The request to check
+    /// - Parameters:
+    ///   - request: The request to check
+    ///   - authIdentity: Optional auth identity
     /// - Returns: True if an identical request is in progress
-    func isRequestInFlight(_ request: URLRequest) -> Bool {
-        let key = RequestKey(from: request)
+    func isRequestInFlight(_ request: URLRequest, authIdentity: String? = nil) -> Bool {
+        guard let key = RequestKey(from: request, authIdentity: authIdentity) else {
+            return false
+        }
         if let existing = inFlightRequests[key] {
             // Check if it's not expired
             return Date().timeIntervalSince(existing.startTime) <= maxRequestAge

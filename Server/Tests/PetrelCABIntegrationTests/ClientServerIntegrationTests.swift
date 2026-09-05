@@ -4,9 +4,11 @@
   @preconcurrency import Crypto
 #endif
 import Foundation
+#if canImport(FoundationNetworking)
+  import FoundationNetworking
+#endif
 import Hummingbird
-import JSONWebKey
-import JSONWebSignature
+import PetrelCrypto
 import Logging
 @testable import Petrel
 @testable import PetrelCABServerCore
@@ -123,9 +125,16 @@ struct ClientServerIntegrationTests {
       )
 
       #expect(response.clientId == "https://cab.test/oauth-client-metadata.json")
-      let jws = try JWS(jwsString: response.clientAssertion)
-      #expect(jws.protectedHeader.keyID == "integration-key")
-      #expect(try jws.verify(key: serverKey.publicKey.jwkRepresentation))
+      let parts = response.clientAssertion.split(separator: ".")
+      #expect(parts.count == 3)
+      let headerData = try JWTBase64URL.decode(String(parts[0]))
+      let headerDict = try #require(try JSONSerialization.jsonObject(with: headerData) as? [String: Any])
+      #expect(headerDict["kid"] as? String == "integration-key")
+
+      let signingInput = "\(parts[0]).\(parts[1])"
+      let signatureBytes = try JWTBase64URL.decode(String(parts[2]))
+      let ecdsaSig = try P256WireSignature.decodeMalleabilityTolerant(signatureBytes)
+      #expect(serverKey.publicKey.isValidSignature(ecdsaSig, for: Data(signingInput.utf8)))
 
       struct Claims: Decodable {
         struct Cnf: Decodable { let jkt: String }
@@ -133,12 +142,14 @@ struct ClientServerIntegrationTests {
         let aud: String
         let cnf: Cnf
       }
-      let claims = try JSONDecoder().decode(Claims.self, from: jws.payload)
+      let payloadData = try JWTBase64URL.decode(String(parts[1]))
+      let claims = try JSONDecoder().decode(Claims.self, from: payloadData)
       #expect(claims.iss == "https://cab.test/oauth-client-metadata.json")
       #expect(claims.aud == "https://auth.example")
-      #expect(claims.cnf.jkt == (try deviceKey.publicKey.jwkRepresentation.thumbprint()))
-    }
+      let deviceJKT = try JWK(publicKey: deviceKey.publicKey).thumbprint()
+      #expect(claims.cnf.jkt == deviceJKT)
   }
+    }
 
   @Test("Nonce dance is transparent: require_nonce server, one client call")
   func nonceDance() async throws {
@@ -154,14 +165,74 @@ struct ClientServerIntegrationTests {
   @Test("Server device refusal surfaces as the typed Petrel error")
   func deviceRefusal() async throws {
     let deviceKey = P256.Signing.PrivateKey()
-    let jkt = try deviceKey.publicKey.jwkRepresentation.thumbprint()
+    let jkt = try JWK(publicKey: deviceKey.publicKey).thumbprint()
     try await withRunningServer(mutateConfig: { $0.deniedJkts = [jkt] }) { port, _ in
       let strategy = makeStrategy(port: port, namespace: "integration.denied")
-      await #expect(throws: AuthError.clientAssertionBackendError(403, "access_denied")) {
+      await #expect(throws: ClientAssertionBackendError(statusCode: 403, code: "access_denied")) {
         _ = try await strategy.fetchClientAssertion(
           aud: "https://auth.example", ephemeralKey: deviceKey
         )
       }
     }
+  }
+
+  @Test("Public cab.swan.place fetch round trip")
+  func publicServerFetch() async throws {
+    let strategy = CABOAuthStrategy(
+      backendURL: URL(string: "https://cab.swan.place")!,
+      storage: KeychainStorage(namespace: "test.public"),
+      accountManager: IntegrationAccountManager(
+        account: Account(
+          did: "did:plc:test",
+          handle: "test.example",
+          pdsURL: URL(string: "https://pds.test")!
+        )
+      ),
+      networkService: NetworkService(baseURL: URL(string: "https://pds.test")!),
+      oauthConfig: OAuthConfig(
+        clientId: "https://cab.swan.place/oauth-client-metadata.json",
+        redirectUri: "blue.catbird.atprotodrive:/callback",
+        scope: "atproto"
+      ),
+      didResolver: IntegrationDIDResolver()
+    )
+    let deviceKey = P256.Signing.PrivateKey()
+    let response = try await strategy.fetchClientAssertion(
+      aud: "https://swan.place", ephemeralKey: deviceKey
+    )
+    #expect(response.clientId == "https://cab.swan.place/oauth-client-metadata.json")
+    #expect(!response.clientAssertion.isEmpty)
+  }
+
+  @Test("Live PAR against swan.place with cab.swan.place assertion")
+  func swanPlacePAR() async throws {
+    let client = try await ATProtoClient(
+      oauthConfig: OAuthConfig(
+        clientId: "https://cab.swan.place/oauth-client-metadata.json",
+        redirectUri: "blue.catbird.atprotodrive:/callback",
+        scope: "atproto"
+      ),
+      namespace: "test.swan.par",
+      authMode: .cab(backendURL: URL(string: "https://cab.swan.place")!)
+    )
+    let authURL = try await client.startOAuthFlow(identifier: "josh.swan.place")
+    print("SWAN.PLACE AUTH URL: \(authURL.absoluteString)")
+    #expect(authURL.absoluteString.starts(with: "https://swan.place/oauth/authorize"))
+  }
+
+  @Test("Live PAR against bsky.social with public-client metadata")
+  func bskySocialPublicOAuthPAR() async throws {
+    let client = try await ATProtoClient(
+      oauthConfig: OAuthConfig(
+        clientId: "https://cab.swan.place/public-client-metadata.json",
+        redirectUri: "blue.catbird.atprotodrive:/callback",
+        scope: "atproto"
+      ),
+      namespace: "test.bsky.public",
+      authMode: .publicOAuth
+    )
+    let authURL = try await client.startOAuthFlow(identifier: "jay.bsky.team")
+    print("BSKY.SOCIAL PUBLIC AUTH URL: \(authURL.absoluteString)")
+    #expect(authURL.absoluteString.starts(with: "https://bsky.social/oauth/authorize"))
   }
 }

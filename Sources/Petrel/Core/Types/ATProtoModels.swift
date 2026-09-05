@@ -5,42 +5,37 @@
 //  Created by Josh LaCalamito on 4/22/2025.
 //
 
-#if canImport(CryptoKit)
-    import CryptoKit
-#else
-    @preconcurrency import Crypto
-#endif
+import Crypto
 import Foundation
 
 public struct AuthorizationServerMetadata: Codable, Sendable, Hashable {
     let issuer: String
     let scopesSupported: [String]
-    let subjectTypesSupported: [String]
+    let subjectTypesSupported: [String]?
     let responseTypesSupported: [String]
-    let responseModesSupported: [String]
+    let responseModesSupported: [String]?
     let grantTypesSupported: [String]
     let codeChallengeMethodsSupported: [String]
-    let uiLocalesSupported: [String]
-    let displayValuesSupported: [String]
-    let authorizationResponseIssParameterSupported: Bool
-    let requestObjectSigningAlgValuesSupported: [String]
-    let requestObjectEncryptionAlgValuesSupported: [String]
-    let requestObjectEncryptionEncValuesSupported: [String]
-    let requestParameterSupported: Bool
-    let requestUriParameterSupported: Bool
-    let requireRequestUriRegistration: Bool
-    let jwksUri: String
+    let uiLocalesSupported: [String]?
+    let displayValuesSupported: [String]?
+    let authorizationResponseIssParameterSupported: Bool?
+    let requestObjectSigningAlgValuesSupported: [String]?
+    let requestObjectEncryptionAlgValuesSupported: [String]?
+    let requestObjectEncryptionEncValuesSupported: [String]?
+    let requestParameterSupported: Bool?
+    let requestUriParameterSupported: Bool?
+    let requireRequestUriRegistration: Bool?
+    let jwksUri: String?
     let authorizationEndpoint: String
     let tokenEndpoint: String
-    let tokenEndpointAuthMethodsSupported: [String]
-    let tokenEndpointAuthSigningAlgValuesSupported: [String]
-    let revocationEndpoint: String
+    let tokenEndpointAuthMethodsSupported: [String]?
+    let tokenEndpointAuthSigningAlgValuesSupported: [String]?
+    let revocationEndpoint: String?
     let introspectionEndpoint: String?
     let pushedAuthorizationRequestEndpoint: String
-    let requirePushedAuthorizationRequests: Bool
-    let dpopSigningAlgValuesSupported: [String]
-    let clientIdMetadataDocumentSupported: Bool
-
+    let requirePushedAuthorizationRequests: Bool?
+    let dpopSigningAlgValuesSupported: [String]?
+    let clientIdMetadataDocumentSupported: Bool?
     enum CodingKeys: String, CodingKey {
         case issuer
         case scopesSupported = "scopes_supported"
@@ -264,6 +259,27 @@ public struct OAuthState: Codable, Equatable, Sendable {
     /// Custom Chat service DID to use for this account
     public let bskyChatDID: String?
 
+    /// Expected authorization server issuer URL/string
+    public let expectedIssuer: String?
+
+    /// Expected PDS origin URL/string
+    public let expectedPDSOrigin: String?
+
+    /// Expected subject DID if known at initiation
+    public let expectedDID: String?
+
+    /// Exact redirect URI used during flow initiation
+    public let redirectURI: String?
+
+    /// DPoP JWK thumbprint (JKT) bound to the ephemeral key
+    public let dpopJKT: String?
+
+    /// Persisted token endpoint for code exchange
+    public let tokenEndpoint: String?
+
+    /// Persisted authorization endpoint
+    public let authorizationEndpoint: String?
+
     public init(
         stateToken: String,
         codeVerifier: String,
@@ -273,7 +289,14 @@ public struct OAuthState: Codable, Equatable, Sendable {
         ephemeralDPoPKey: Data? = nil,
         parResponseNonce: String? = nil,
         bskyAppViewDID: String? = nil,
-        bskyChatDID: String? = nil
+        bskyChatDID: String? = nil,
+        expectedIssuer: String? = nil,
+        expectedPDSOrigin: String? = nil,
+        expectedDID: String? = nil,
+        redirectURI: String? = nil,
+        dpopJKT: String? = nil,
+        tokenEndpoint: String? = nil,
+        authorizationEndpoint: String? = nil
     ) {
         self.stateToken = stateToken
         self.codeVerifier = codeVerifier
@@ -284,6 +307,13 @@ public struct OAuthState: Codable, Equatable, Sendable {
         self.parResponseNonce = parResponseNonce
         self.bskyAppViewDID = bskyAppViewDID
         self.bskyChatDID = bskyChatDID
+        self.expectedIssuer = expectedIssuer
+        self.expectedPDSOrigin = expectedPDSOrigin
+        self.expectedDID = expectedDID
+        self.redirectURI = redirectURI
+        self.dpopJKT = dpopJKT
+        self.tokenEndpoint = tokenEndpoint
+        self.authorizationEndpoint = authorizationEndpoint
     }
 }
 

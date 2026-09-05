@@ -25,7 +25,7 @@ public enum AppBskyFeedDefs {
         public let debug: ATProtocolValueContainer?
 
         public init(
-            uri: ATProtocolURI, cid: CID, author: AppBskyActorDefs.ProfileViewBasic, record: ATProtocolValueContainer, embed: PostViewEmbedUnion?, bookmarkCount: Int?, replyCount: Int?, repostCount: Int?, likeCount: Int?, quoteCount: Int?, indexedAt: ATProtocolDate, viewer: ViewerState?, labels: [ComAtprotoLabelDefs.Label]?, threadgate: ThreadgateView?, debug: ATProtocolValueContainer?
+            uri: ATProtocolURI, cid: CID, author: AppBskyActorDefs.ProfileViewBasic, record: ATProtocolValueContainer, embed: PostViewEmbedUnion? = nil, bookmarkCount: Int? = nil, replyCount: Int? = nil, repostCount: Int? = nil, likeCount: Int? = nil, quoteCount: Int? = nil, indexedAt: ATProtocolDate, viewer: ViewerState? = nil, labels: [ComAtprotoLabelDefs.Label]? = nil, threadgate: ThreadgateView? = nil, debug: ATProtocolValueContainer? = nil
         ) {
             self.uri = uri
             self.cid = cid
@@ -375,9 +375,10 @@ public enum AppBskyFeedDefs {
         public let replyDisabled: Bool?
         public let embeddingDisabled: Bool?
         public let pinned: Bool?
+        public let knownLikers: KnownLikers?
 
         public init(
-            repost: ATProtocolURI?, like: ATProtocolURI?, bookmarked: Bool?, threadMuted: Bool?, replyDisabled: Bool?, embeddingDisabled: Bool?, pinned: Bool?
+            repost: ATProtocolURI? = nil, like: ATProtocolURI? = nil, bookmarked: Bool? = nil, threadMuted: Bool? = nil, replyDisabled: Bool? = nil, embeddingDisabled: Bool? = nil, pinned: Bool? = nil, knownLikers: KnownLikers? = nil
         ) {
             self.repost = repost
             self.like = like
@@ -386,6 +387,7 @@ public enum AppBskyFeedDefs {
             self.replyDisabled = replyDisabled
             self.embeddingDisabled = embeddingDisabled
             self.pinned = pinned
+            self.knownLikers = knownLikers
         }
 
         public init(from decoder: Decoder) throws {
@@ -446,6 +448,14 @@ public enum AppBskyFeedDefs {
                 LogManager.logWarning("Decoding error for optional property 'pinned' — degrading to nil: \(error)")
                 pinned = nil
             }
+            do {
+                knownLikers = try container.decodeIfPresent(KnownLikers.self, forKey: .knownLikers)
+            } catch {
+                // Forward compatibility: a malformed or unknown-shaped optional field
+                // must not fail the whole response.
+                LogManager.logWarning("Decoding error for optional property 'knownLikers' — degrading to nil: \(error)")
+                knownLikers = nil
+            }
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -458,6 +468,7 @@ public enum AppBskyFeedDefs {
             try container.encodeIfPresent(replyDisabled, forKey: .replyDisabled)
             try container.encodeIfPresent(embeddingDisabled, forKey: .embeddingDisabled)
             try container.encodeIfPresent(pinned, forKey: .pinned)
+            try container.encodeIfPresent(knownLikers, forKey: .knownLikers)
         }
 
         public func hash(into hasher: inout Hasher) {
@@ -496,6 +507,11 @@ public enum AppBskyFeedDefs {
             } else {
                 hasher.combine(nil as Int?)
             }
+            if let value = knownLikers {
+                hasher.combine(value)
+            } else {
+                hasher.combine(nil as Int?)
+            }
         }
 
         public func isEqual(to other: any ATProtocolValue) -> Bool {
@@ -519,6 +535,9 @@ public enum AppBskyFeedDefs {
                 return false
             }
             if pinned != other.pinned {
+                return false
+            }
+            if knownLikers != other.knownLikers {
                 return false
             }
             return true
@@ -559,6 +578,10 @@ public enum AppBskyFeedDefs {
                 let pinnedValue = try value.toCBORValue()
                 map = map.adding(key: "pinned", value: pinnedValue)
             }
+            if let value = knownLikers {
+                let knownLikersValue = try value.toCBORValue()
+                map = map.adding(key: "knownLikers", value: knownLikersValue)
+            }
             return map
         }
 
@@ -571,6 +594,79 @@ public enum AppBskyFeedDefs {
             case replyDisabled
             case embeddingDisabled
             case pinned
+            case knownLikers
+        }
+    }
+
+    public struct KnownLikers: ATProtocolCodable, ATProtocolValue {
+        public static let typeIdentifier = "app.bsky.feed.defs#knownLikers"
+        public let count: Int
+        public let actors: [AppBskyActorDefs.ProfileViewBasic]
+
+        public init(
+            count: Int, actors: [AppBskyActorDefs.ProfileViewBasic]
+        ) {
+            self.count = count
+            self.actors = actors
+        }
+
+        public init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            do {
+                count = try container.decode(Int.self, forKey: .count)
+            } catch {
+                LogManager.logError("Decoding error for required property 'count': \(error)")
+                throw error
+            }
+            do {
+                actors = try container.decode([AppBskyActorDefs.ProfileViewBasic].self, forKey: .actors)
+            } catch {
+                LogManager.logError("Decoding error for required property 'actors': \(error)")
+                throw error
+            }
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(Self.typeIdentifier, forKey: .typeIdentifier)
+            try container.encode(count, forKey: .count)
+            try container.encode(actors, forKey: .actors)
+        }
+
+        public func hash(into hasher: inout Hasher) {
+            hasher.combine(count)
+            hasher.combine(actors)
+        }
+
+        public func isEqual(to other: any ATProtocolValue) -> Bool {
+            guard let other = other as? Self else { return false }
+            if count != other.count {
+                return false
+            }
+            if actors != other.actors {
+                return false
+            }
+            return true
+        }
+
+        public static func == (lhs: Self, rhs: Self) -> Bool {
+            return lhs.isEqual(to: rhs)
+        }
+
+        public func toCBORValue() throws -> Any {
+            var map = OrderedCBORMap()
+            map = map.adding(key: "$type", value: Self.typeIdentifier)
+            let countValue = try count.toCBORValue()
+            map = map.adding(key: "count", value: countValue)
+            let actorsValue = try actors.toCBORValue()
+            map = map.adding(key: "actors", value: actorsValue)
+            return map
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case typeIdentifier = "$type"
+            case count
+            case actors
         }
     }
 
@@ -579,7 +675,7 @@ public enum AppBskyFeedDefs {
         public let rootAuthorLike: ATProtocolURI?
 
         public init(
-            rootAuthorLike: ATProtocolURI?
+            rootAuthorLike: ATProtocolURI? = nil
         ) {
             self.rootAuthorLike = rootAuthorLike
         }
@@ -647,7 +743,7 @@ public enum AppBskyFeedDefs {
         public let reqId: String?
 
         public init(
-            post: PostView, reply: ReplyRef?, reason: FeedViewPostReasonUnion?, feedContext: String?, reqId: String?
+            post: PostView, reply: ReplyRef? = nil, reason: FeedViewPostReasonUnion? = nil, feedContext: String? = nil, reqId: String? = nil
         ) {
             self.post = post
             self.reply = reply
@@ -797,7 +893,7 @@ public enum AppBskyFeedDefs {
         public let grandparentAuthor: AppBskyActorDefs.ProfileViewBasic?
 
         public init(
-            root: ReplyRefRootUnion, parent: ReplyRefParentUnion, grandparentAuthor: AppBskyActorDefs.ProfileViewBasic?
+            root: ReplyRefRootUnion, parent: ReplyRefParentUnion, grandparentAuthor: AppBskyActorDefs.ProfileViewBasic? = nil
         ) {
             self.root = root
             self.parent = parent
@@ -894,7 +990,7 @@ public enum AppBskyFeedDefs {
         public let indexedAt: ATProtocolDate
 
         public init(
-            by: AppBskyActorDefs.ProfileViewBasic, uri: ATProtocolURI?, cid: CID?, indexedAt: ATProtocolDate
+            by: AppBskyActorDefs.ProfileViewBasic, uri: ATProtocolURI? = nil, cid: CID? = nil, indexedAt: ATProtocolDate
         ) {
             self.by = by
             self.uri = uri
@@ -1049,7 +1145,7 @@ public enum AppBskyFeedDefs {
         public let threadContext: ThreadContext?
 
         public init(
-            post: PostView, parent: ThreadViewPostParentUnion?, replies: [ThreadViewPostRepliesUnion]?, threadContext: ThreadContext?
+            post: PostView, parent: ThreadViewPostParentUnion? = nil, replies: [ThreadViewPostRepliesUnion]? = nil, threadContext: ThreadContext? = nil
         ) {
             self.post = post
             self.parent = parent
@@ -1335,7 +1431,7 @@ public enum AppBskyFeedDefs {
         public let viewer: AppBskyActorDefs.ViewerState?
 
         public init(
-            did: DID, viewer: AppBskyActorDefs.ViewerState?
+            did: DID, viewer: AppBskyActorDefs.ViewerState? = nil
         ) {
             self.did = did
             self.viewer = viewer
@@ -1427,7 +1523,7 @@ public enum AppBskyFeedDefs {
         public let indexedAt: ATProtocolDate
 
         public init(
-            uri: ATProtocolURI, cid: CID, did: DID, creator: AppBskyActorDefs.ProfileView, displayName: String, description: String?, descriptionFacets: [AppBskyRichtextFacet]?, avatar: URI?, likeCount: Int?, acceptsInteractions: Bool?, labels: [ComAtprotoLabelDefs.Label]?, viewer: GeneratorViewerState?, contentMode: String?, indexedAt: ATProtocolDate
+            uri: ATProtocolURI, cid: CID, did: DID, creator: AppBskyActorDefs.ProfileView, displayName: String, description: String? = nil, descriptionFacets: [AppBskyRichtextFacet]? = nil, avatar: URI? = nil, likeCount: Int? = nil, acceptsInteractions: Bool? = nil, labels: [ComAtprotoLabelDefs.Label]? = nil, viewer: GeneratorViewerState? = nil, contentMode: String? = nil, indexedAt: ATProtocolDate
         ) {
             self.uri = uri
             self.cid = cid
@@ -1742,7 +1838,7 @@ public enum AppBskyFeedDefs {
         public let like: ATProtocolURI?
 
         public init(
-            like: ATProtocolURI?
+            like: ATProtocolURI? = nil
         ) {
             self.like = like
         }
@@ -1808,7 +1904,7 @@ public enum AppBskyFeedDefs {
         public let feedContext: String?
 
         public init(
-            post: ATProtocolURI, reason: SkeletonFeedPostReasonUnion?, feedContext: String?
+            post: ATProtocolURI, reason: SkeletonFeedPostReasonUnion? = nil, feedContext: String? = nil
         ) {
             self.post = post
             self.reason = reason
@@ -2004,7 +2100,7 @@ public enum AppBskyFeedDefs {
         public let lists: [AppBskyGraphDefs.ListViewBasic]?
 
         public init(
-            uri: ATProtocolURI?, cid: CID?, record: ATProtocolValueContainer?, lists: [AppBskyGraphDefs.ListViewBasic]?
+            uri: ATProtocolURI? = nil, cid: CID? = nil, record: ATProtocolValueContainer? = nil, lists: [AppBskyGraphDefs.ListViewBasic]? = nil
         ) {
             self.uri = uri
             self.cid = cid
@@ -2140,7 +2236,7 @@ public enum AppBskyFeedDefs {
         public let reqId: String?
 
         public init(
-            item: ATProtocolURI?, event: String?, feedContext: String?, reqId: String?
+            item: ATProtocolURI? = nil, event: String? = nil, feedContext: String? = nil, reqId: String? = nil
         ) {
             self.item = item
             self.event = event

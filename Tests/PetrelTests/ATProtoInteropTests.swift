@@ -71,7 +71,6 @@ struct ATProtoInteropTests {
                 "xn--masekowski-d0b.pl",
                 "john.t",
             ]
-
             for handleString in validHandles {
                 #expect(throws: Never.self) {
                     try ATIdentifier(string: handleString)
@@ -165,7 +164,6 @@ struct ATProtoInteropTests {
                 }
             }
         }
-
         @Test("Invalid ATIdentifiers - DIDs")
         func invalidDIDs() {
             let invalidDIDs = [
@@ -202,6 +200,7 @@ struct ATProtoInteropTests {
             let validHandles = [
                 "A.ISI.EDU",
                 "XX.LCS.MIT.EDU",
+                "SRI-NIC.ARPA",
                 "john.test",
                 "jan.test",
                 "a234567890123456789.test",
@@ -226,9 +225,30 @@ struct ATProtoInteropTests {
                 "12345.test",
                 "8.cn",
                 "4chan.org",
+                "4chan.o-g",
+                "blah.4chan.org",
+                "thing.a01",
+                "120.0.0.1.com",
+                "0john.test",
+                "9sta--ck.com",
+                "99stack.com",
+                "0ohn.test",
+                "john.t--t",
+                "thing.0aa.thing",
+                "stack.com",
+                "sta-ck.com",
+                "sta---ck.com",
+                "sta--ck9.com",
+                "stack99.com",
+                "sta99ck.com",
+                "google.com.uk",
+                "google.co.in",
+                "google.com",
+                "maselkowski.pl",
+                "m.maselkowski.pl",
+                "xn--masekowski-d0b.pl",
                 "john.t",
             ]
-
             for handleString in validHandles {
                 #expect(throws: Never.self) {
                     try Handle(handleString: handleString)
@@ -406,6 +426,7 @@ struct ATProtoInteropTests {
                 "at://did:abc:123/io.nsid.someFunc/~",
                 "at://did:abc:123/io.nsid.someFunc/...",
                 "at://did:plc:asdf123/com.atproto.feed.postV2",
+                "at://laptop.local/com.atproto.feed.post/abc",
             ]
 
             for uriString in validURIs {
@@ -414,8 +435,24 @@ struct ATProtoInteropTests {
                 }
             }
         }
-    }
+        @Test("Invalid AT URIs")
+        func invalidATURIs() {
+            let invalidURIs = [
+                "at://",
+                "at://did:plc:asdf123/com.atproto.feed.post/.",
+                "at://did:plc:asdf123/com.atproto.feed.post/..",
+                "at://did:plc:asdf123/invalidcollection/abc",
+                "at://did:plc:asdf123/com.atproto.feed.post/abc/extra",
+                "at://not_a_valid_authority/com.atproto.feed.post/abc",
+            ]
 
+            for uriString in invalidURIs {
+                #expect(throws: (any Error).self) {
+                    try ATProtocolURI(uriString: uriString)
+                }
+            }
+        }
+    }
     // MARK: - Record Key Tests
 
     @Suite("Record Key Validation")
@@ -446,8 +483,23 @@ struct ATProtoInteropTests {
                 }
             }
         }
-    }
+        @Test("Invalid Record Keys")
+        func invalidRecordKeys() {
+            let invalidKeys = [
+                ".",
+                "..",
+                "",
+                "has spaces",
+                "has/slash",
+            ]
 
+            for keyString in invalidKeys {
+                #expect(throws: (any Error).self) {
+                    try RecordKey(keyString: keyString)
+                }
+            }
+        }
+    }
     // MARK: - TID Tests
 
     @Suite("TID Validation")

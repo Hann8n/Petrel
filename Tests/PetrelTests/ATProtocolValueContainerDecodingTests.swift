@@ -581,6 +581,226 @@ struct ATProtocolValueContainerDecodingTests {
         #expect(Set([link, link]).count == 1)
         #expect(Set([bytes, bytes]).count == 1)
     }
+
+    @Test("CAR record decode pins known types with unknown fields and nested un-framed types")
+    func carRecordDecodePinsKnownAndFramingBehavior() throws {
+        let validPostMap = OrderedCBORMap(entries: [
+            (key: "$type", value: AppBskyFeedPost.typeIdentifier),
+            (key: "text", value: "hello world"),
+            (key: "createdAt", value: "2026-08-21T12:00:00.000Z"),
+            (key: "via", value: "ThirdPartyClient"),
+            (key: "facets", value: [
+                OrderedCBORMap(entries: [
+                    (key: "index", value: OrderedCBORMap(entries: [
+                        (key: "byteStart", value: 0),
+                        (key: "byteEnd", value: 5),
+                    ])),
+                    (key: "features", value: [
+                        OrderedCBORMap(entries: [
+                            (key: "$type", value: "app.bsky.richtext.facet#tag"),
+                            (key: "tag", value: "hello"),
+                        ]),
+                    ]),
+                ]),
+            ]),
+        ])
+        let validCBOR = try DAGCBOR.encodeValue(validPostMap)
+        let decoded = try CARRepository.decodeRecordCBOR(validCBOR)
+
+        guard case let .knownType(value) = decoded,
+              let post = value as? AppBskyFeedPost
+        else {
+            Issue.record("Expected .knownType(AppBskyFeedPost), got \(decoded)")
+            return
+        }
+        #expect(post.text == "hello world")
+        #expect(post.facets?.count == 1)
+        #expect(post.facets?.first?.index.byteStart == 0)
+        #expect(post.facets?.first?.index.byteEnd == 5)
+    }
+
+    @Test("CAR record decode pins fallback for unregistered type and missing $type")
+    func carRecordDecodePinsFallbackBehaviors() throws {
+        let untypedMap = OrderedCBORMap(entries: [
+            (key: "text", value: "no type"),
+            (key: "createdAt", value: "2026-08-21T12:00:00.000Z"),
+        ])
+        let untypedCBOR = try DAGCBOR.encodeValue(untypedMap)
+        let decodedUntyped = try CARRepository.decodeRecordCBOR(untypedCBOR)
+        guard case let .object(obj) = decodedUntyped else {
+            Issue.record("Expected .object for untyped record, got \(decodedUntyped)")
+            return
+        }
+        #expect(obj["text"] == .string("no type"))
+
+        let unknownTypeMap = OrderedCBORMap(entries: [
+            (key: "$type", value: "com.example.unregistered#record"),
+            (key: "title", value: "custom"),
+        ])
+        let unknownCBOR = try DAGCBOR.encodeValue(unknownTypeMap)
+        let decodedUnknown = try CARRepository.decodeRecordCBOR(unknownCBOR)
+        guard case let .unknownType(typeName, .object(unknownObj)) = decodedUnknown else {
+            Issue.record("Expected .unknownType for unregistered record, got \(decodedUnknown)")
+            return
+        }
+        #expect(typeName == "com.example.unregistered#record")
+        #expect(unknownObj["title"] == .string("custom"))
+    }
+
+    @Test("Production lossless-decode guard demotes to unknownType when decoder normalizes field content")
+    func productionLosslessGuardDemotesOnNormalizedFieldContent() throws {
+        let type = ComAtprotoLabelDefs.Label.typeIdentifier
+        let spacedURI = " https://example.com/item "
+        let rawObject = ATProtocolValueContainer.object([
+            "$type": .string(type),
+            "src": .string("did:plc:example1234567890abcdef"),
+            "uri": .string(spacedURI),
+            "val": .string("test-label"),
+            "cts": .string("2026-08-21T12:00:00.000Z"),
+        ])
+        let encoded = try rawObject.encodedDAGCBOR()
+
+        // Decoded via production DAG-CBOR path (fromCBOR)
+        let decodedDAG = try ATProtocolValueContainer.decodedFromDAGCBOR(encoded)
+        guard case let .unknownType(typeName, .object(decodedRaw)) = decodedDAG else {
+            Issue.record("Expected production guard to fall back to .unknownType due to whitespace trimming, got \(decodedDAG)")
+            return
+        }
+        #expect(typeName == type)
+        #expect(decodedRaw["uri"] == .string(spacedURI))
+
+        // Decoded via production JSON path (decodeValue / decodeObjectValue)
+        let jsonData = try JSONSerialization.data(withJSONObject: [
+            "$type": type,
+            "src": "did:plc:example1234567890abcdef",
+            "uri": spacedURI,
+            "val": "test-label",
+            "cts": "2026-08-21T12:00:00.000Z",
+        ])
+        let decodedJSON = try JSONDecoder().decode(ATProtocolValueContainer.self, from: jsonData)
+        guard case let .unknownType(jsonTypeName, .object(jsonDecodedRaw)) = decodedJSON else {
+            Issue.record("Expected production JSON guard to fall back to .unknownType, got \(decodedJSON)")
+            return
+        }
+        #expect(jsonTypeName == type)
+        #expect(jsonDecodedRaw["uri"] == .string(spacedURI))
+    }
+
+    @Test("Direct spec-tolerant comparison detects lossy field mutation and tolerates unknown fields")
+    func specTolerantComparisonDetectsLossyDecodeDirectly() throws {
+        let type = AppBskyFeedPost.typeIdentifier
+        let postA = AppBskyFeedPost(
+            text: "Hello World",
+            entities: nil,
+            facets: nil,
+            reply: nil,
+            embed: nil,
+            langs: nil,
+            labels: nil,
+            tags: nil,
+            createdAt: try #require(ATProtocolDate(iso8601String: "2026-08-21T12:00:00.000Z"))
+        )
+        let typedContainerA = ATProtocolValueContainer.knownType(postA)
+
+        // Divergent raw object (text is different)
+        let divergentRaw = ATProtocolValueContainer.object([
+            "$type": .string(type),
+            "text": .string("Different Text"),
+            "createdAt": .string("2026-08-21T12:00:00.000Z"),
+        ])
+        #expect(!ATProtocolValueContainer.isSpecTolerantMatch(typed: typedContainerA, raw: divergentRaw))
+
+        // Compatible raw object with unknown field
+        let compatibleRawWithUnknown = ATProtocolValueContainer.object([
+            "$type": .string(type),
+            "text": .string("Hello World"),
+            "createdAt": .string("2026-08-21T12:00:00.000Z"),
+            "via": .string("ThirdPartyClient"),
+        ])
+        #expect(ATProtocolValueContainer.isSpecTolerantMatch(typed: typedContainerA, raw: compatibleRawWithUnknown))
+    }
+
+    @Test("Direct spec-tolerant comparison rejects equal objects containing knownType with decode error")
+    func specTolerantComparisonRejectsKnownTypeWithDecodeError() {
+        let nestedError = ATProtocolValueContainer.knownType(ATProtocolValueContainer.decodeError("x"))
+        let typedObj = ATProtocolValueContainer.object(["nested": nestedError])
+        let rawObj = ATProtocolValueContainer.object(["nested": nestedError])
+
+        // Direct equality is true (container Equatable), but spec-tolerant comparison must reject (false)
+        #expect(typedObj == rawObj)
+        #expect(!ATProtocolValueContainer.isSpecTolerantMatch(typed: typedObj, raw: rawObj))
+
+        // Also test when raw has an extra raw-only field
+        let rawWithExtra = ATProtocolValueContainer.object([
+            "nested": nestedError,
+            "extra": .string("foo"),
+        ])
+        #expect(!ATProtocolValueContainer.isSpecTolerantMatch(typed: typedObj, raw: rawWithExtra))
+    }
+
+    @Test("CAR record decode falls back to unknownType when typed decode is lossy")
+    func carRecordDecodeFallsBackOnLossyDecode() throws {
+        let lossyMap = OrderedCBORMap(entries: [
+            (key: "$type", value: AppBskyFeedPost.typeIdentifier),
+            (key: "text", value: 12345),
+            (key: "createdAt", value: "2026-08-21T12:00:00.000Z"),
+        ])
+        let lossyCBOR = try DAGCBOR.encodeValue(lossyMap)
+        let decodedLossy = try CARRepository.decodeRecordCBOR(lossyCBOR)
+        guard case let .unknownType(typeName, .object(lossyObj)) = decodedLossy else {
+            Issue.record("Expected .unknownType for lossy record, got \(decodedLossy)")
+            return
+        }
+        #expect(typeName == AppBskyFeedPost.typeIdentifier)
+        #expect(lossyObj["text"] == .number(12345))
+    }
+
+    @Test("CAR record decode rejects empty and non-map/array root CBOR")
+    func carRecordDecodeRejectsMalformedRoots() {
+        do {
+            _ = try CARRepository.decodeRecordCBOR(Data())
+            Issue.record("Expected CARReaderError for empty data")
+        } catch let error as CARReaderError {
+            guard case let .decodingFailed(message) = error, message == "Empty CBOR data" else {
+                Issue.record("Expected decodingFailed(\"Empty CBOR data\"), got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected CARReaderError, got \(error)")
+        }
+
+        let primitiveCBOR = Data([0x65, 0x68, 0x65, 0x6c, 0x6c, 0x6f]) // "hello"
+        do {
+            _ = try CARRepository.decodeRecordCBOR(primitiveCBOR)
+            Issue.record("Expected CARReaderError for non-map/array root")
+        } catch let error as CARReaderError {
+            guard case let .decodingFailed(message) = error, message == "CBOR root is not a map or array" else {
+                Issue.record("Expected decodingFailed(\"CBOR root is not a map or array\"), got \(error)")
+                return
+            }
+        } catch {
+            Issue.record("Expected CARReaderError, got \(error)")
+        }
+    }
+
+    @Test("DAG-CBOR decoding rejects malformed 1-key $link and $bytes maps")
+    func dagCBORDecodingRejectsMalformedSpecialMaps() throws {
+        let invalidLinkMap = OrderedCBORMap(entries: [
+            (key: "$link", value: 12345),
+        ])
+        let invalidLinkCBOR = try DAGCBOR.encodeValue(invalidLinkMap)
+        #expect(throws: DAGCBORError.self) {
+            try ATProtocolValueContainer.decodedFromDAGCBOR(invalidLinkCBOR)
+        }
+
+        let invalidBytesMap = OrderedCBORMap(entries: [
+            (key: "$bytes", value: 12345),
+        ])
+        let invalidBytesCBOR = try DAGCBOR.encodeValue(invalidBytesMap)
+        #expect(throws: DAGCBORError.self) {
+            try ATProtocolValueContainer.decodedFromDAGCBOR(invalidBytesCBOR)
+        }
+    }
 }
 
 private func decodeJSON(_ json: String) -> ATProtocolValueContainer? {

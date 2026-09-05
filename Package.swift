@@ -13,13 +13,36 @@ let package = Package(
             name: "Petrel",
             targets: ["Petrel"]
         ),
+        .library(
+            name: "PetrelCore",
+            targets: ["PetrelCore"]
+        ),
+        .library(
+            name: "PetrelCrypto",
+            targets: ["PetrelCrypto"]
+        ),
+        .library(
+            name: "PetrelRepo",
+            targets: ["PetrelRepo"]
+        ),
+        .library(
+            name: "PetrelFirehose",
+            targets: ["PetrelFirehose"]
+        ),
+        .library(
+            name: "PetrelPLC",
+            targets: ["PetrelPLC"]
+        ),
+        .library(
+            name: "PetrelJetstream",
+            targets: ["PetrelJetstream"]
+        ),
         .executable(
             name: "PetrelLoad",
             targets: ["PetrelLoad"]
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/beatt83/jose-swift.git", .upToNextMajor(from: "6.0.0")),
         .package(url: "https://github.com/valpackett/SwiftCBOR.git", .upToNextMinor(from: "0.6.0")),
         .package(
             url: "https://github.com/apple/swift-async-dns-resolver",
@@ -28,6 +51,9 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMajor(from: "3.0.0")),
         .package(url: "https://github.com/apple/swift-log.git", .upToNextMajor(from: "1.0.0")),
         .package(url: "https://github.com/apple/swift-docc-plugin", from: "1.4.5"),
+        .package(url: "https://github.com/GigaBitcoin/secp256k1.swift.git", exact: "0.15.0"),
+        // Pinned to 1.5.7: release tag ships Package.swift with the `libzstd` product.
+        .package(url: "https://github.com/facebook/zstd.git", .upToNextMinor(from: "1.5.7")),
     ],
     targets: [
         // System library for libsecret (Linux only, ignored on other platforms)
@@ -54,14 +80,83 @@ let package = Package(
         ),
 
         .target(
+            name: "PetrelCrypto",
+            dependencies: [
+                .product(name: "Crypto", package: "swift-crypto"),
+                .product(name: "secp256k1", package: "secp256k1.swift"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PetrelCore",
+            dependencies: [
+                "PetrelCrypto",
+                "SwiftCBOR",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
             name: "Petrel",
             dependencies: [
-                "jose-swift",
+                "PetrelCore",
+                "PetrelCrypto",
                 "SwiftCBOR",
                 .product(name: "AsyncDNSResolver", package: "swift-async-dns-resolver"),
-                .product(name: "Crypto", package: "swift-crypto", condition: .when(platforms: [.linux])),
+                .product(name: "Crypto", package: "swift-crypto"),
                 .product(name: "Logging", package: "swift-log"),
                 .target(name: "CLibSecretShim", condition: .when(platforms: [.linux])),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PetrelRepo",
+            dependencies: [
+                "Petrel",
+                "PetrelCrypto",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PetrelFirehose",
+            dependencies: [
+                "Petrel",
+                "PetrelCrypto",
+                "PetrelRepo",
+                .product(name: "Crypto", package: "swift-crypto"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PetrelJetstream",
+            dependencies: [
+                "Petrel",
+                "PetrelCore",
+                "PetrelFirehose",
+                "SwiftCBOR",
+                .product(name: "libzstd", package: "zstd"),
+            ],
+            swiftSettings: [
+                .swiftLanguageMode(.v6),
+            ]
+        ),
+        .target(
+            name: "PetrelPLC",
+            dependencies: [
+                "PetrelCore",
+                "PetrelCrypto",
+                .product(name: "Crypto", package: "swift-crypto"),
             ],
             swiftSettings: [
                 .swiftLanguageMode(.v6),
@@ -73,7 +168,31 @@ let package = Package(
         ),
         .testTarget(
             name: "PetrelTests",
-            dependencies: ["Petrel"]
+            dependencies: ["Petrel", "PetrelCrypto"]
+        ),
+        .testTarget(
+            name: "PetrelCryptoTests",
+            dependencies: ["PetrelCrypto"]
+        ),
+        .testTarget(
+            name: "PetrelCoreTests",
+            dependencies: ["PetrelCore", "PetrelCrypto"]
+        ),
+        .testTarget(
+            name: "PetrelRepoTests",
+            dependencies: ["PetrelRepo"]
+        ),
+        .testTarget(
+            name: "PetrelFirehoseTests",
+            dependencies: ["PetrelFirehose", "PetrelRepo"]
+        ),
+        .testTarget(
+            name: "PetrelJetstreamTests",
+            dependencies: ["PetrelJetstream", "PetrelFirehose"]
+        ),
+        .testTarget(
+            name: "PetrelPLCTests",
+            dependencies: ["PetrelPLC", "PetrelCrypto", "PetrelCore"]
         ),
         .testTarget(
             name: "PetrelLoadTests",

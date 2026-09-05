@@ -297,7 +297,6 @@ val spaceDeclaration = SpaceDeclarationDescriptor(
                 enum_name = self.class_name + "Defs" + convert_to_pascal_case(name)
                 identity = ("definition", self.lexicon_id, name)
                 self.enum_generator.generate_closed_string_enum(enum_name, def_schema['enum'], identity)
-
             elif def_type == 'string' and 'knownValues' in def_schema:
                 print(f"Generating enum for {name}")
                 # Generate enum class
@@ -343,9 +342,24 @@ val spaceDeclaration = SpaceDeclarationDescriptor(
                     converted_refs = [self.type_converter.convert_ref(r) for r in raw_refs]
                     self.enum_generator.generate_sealed_interface_for_union_array(self.class_name, name, converted_refs, raw_refs=raw_refs)
 
-            elif def_type == 'array' and def_schema.get('items', {}).get('type') == 'union':
-                # This block is now redundant or covered above
+            elif def_type == 'token':
+                # Tokens are bare wire constants referenced by value inside
+                # enum/knownValues lists, never by `ref`, so they need no
+                # Kotlin declaration. Verified across both corpora: zero refs
+                # resolve to a token def.
                 pass
+
+            else:
+                # Every shape above either declares a type or is deliberately
+                # skipped. Falling through silently is what let union, bytes,
+                # and plain-string defs mint 19 undeclared names that convert_ref
+                # was already handing out — so an unknown shape is a generator
+                # bug, not something to emit nothing for.
+                raise ValueError(
+                    f"unhandled lexicon def shape '{def_type}' for "
+                    f"'{self.lexicon_id}#{name}': convert_ref would resolve refs "
+                    f"to it as '{class_name}' with no declaration to match"
+                )
 
         return self.template_manager.lex_definitions_template.render(
             definitions=definitions

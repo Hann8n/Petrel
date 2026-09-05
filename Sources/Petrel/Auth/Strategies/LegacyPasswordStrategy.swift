@@ -118,13 +118,7 @@ actor LegacyPasswordStrategy: AuthStrategy {
             password: password
         )
 
-        // Temporarily update network service to point to the user's PDS
-        let originalBaseURL = await networkService.baseURL
-        await networkService.setBaseURL(pdsURL)
-
-        // Make direct HTTP call to createSession to avoid token refresh loop
-        // (The generated client calls performRequest with skipTokenRefresh=false which
-        // tries to refresh before the request, causing failures when re-logging in)
+        // Make direct unauthenticated exact-origin HTTP call to createSession without mutating baseURL
         LogManager.logError("[E2E-TRACE] Calling createSession DIRECTLY on PDS: \(pdsURL.absoluteString)", category: .authentication)
         let (responseCode, sessionOutput): (Int, ComAtprotoServerCreateSession.Output?)
         do {
@@ -133,16 +127,16 @@ actor LegacyPasswordStrategy: AuthStrategy {
             request.httpMethod = "POST"
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.setValue("application/json", forHTTPHeaderField: "Accept")
-            request.httpBody = try JSONEncoder().encode(sessionInput)
+            request.httpBody = try JSONCoders.encode(sessionInput)
 
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await networkService.executeUnauthenticatedRequest(request)
             guard let httpResponse = response as? HTTPURLResponse else {
                 throw AuthError.invalidResponse
             }
             responseCode = httpResponse.statusCode
 
             if responseCode == 200 {
-                sessionOutput = try JSONDecoder().decode(ComAtprotoServerCreateSession.Output.self, from: data)
+                sessionOutput = try JSONCoders.decode(ComAtprotoServerCreateSession.Output.self, from: data)
             } else {
                 // Log error response body for debugging
                 if let errorBody = String(data: data, encoding: .utf8) {
@@ -153,13 +147,8 @@ actor LegacyPasswordStrategy: AuthStrategy {
             LogManager.logError("[E2E-TRACE] createSession returned code: \(responseCode)", category: .authentication)
         } catch {
             LogManager.logError("[E2E-TRACE] createSession THREW: \(error)", category: .authentication)
-            await networkService.setBaseURL(originalBaseURL)
             throw error
         }
-
-        // Restore original base URL
-        await networkService.setBaseURL(originalBaseURL)
-
         guard responseCode == 200, let output = sessionOutput else {
             LogManager.logError("Failed to create session: HTTP \(responseCode)", category: .authentication)
             throw AuthError.invalidCredentials
@@ -454,7 +443,7 @@ actor LegacyPasswordStrategy: AuthStrategy {
                 LogManager.logInfo("✅ performLegacyTokenRefresh: Success (HTTP \(httpResponse.statusCode))")
 
                 // Parse the refresh response
-                let refreshResponse = try JSONDecoder().decode(LegacyRefreshSessionResponse.self, from: data)
+                let refreshResponse = try JSONCoders.decode(LegacyRefreshSessionResponse.self, from: data)
 
                 // Parse actual expiration from the refreshed JWT
                 let actualExpiresIn = parseJWTExpiration(refreshResponse.accessJwt) ?? 3600

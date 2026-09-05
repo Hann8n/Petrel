@@ -10,7 +10,7 @@ from kotlin_code_generator import KotlinCodeGenerator
 from kotlin_type_converter import convert_to_pascal_case
 from utils import convert_to_camel_case
 from cycle_detector import CycleDetector
-from generated_projection import write_swift_projection
+from generated_projection import write_swift_projection, write_kotlin_projection
 
 def get_namespace_path(lexicon_id: str) -> str:
     """Convert lexicon ID to hierarchical path.
@@ -202,6 +202,7 @@ async def generate_swift_from_lexicons_recursive(
     package_name='Petrel',
     core_namespace_roots: Sequence[str] = (),
     emit_server_contracts=False,
+    emit_xrpc_error_parsing=False,
 ):
     type_dict = {}
     namespace_hierarchy = {}
@@ -273,10 +274,30 @@ async def generate_swift_from_lexicons_recursive(
                 type_key = f"{lexicon_id}#{type_name}" if type_name != 'main' else lexicon_id
                 type_dict[type_key] = f"{swift_lex_id}{swift_type_name}"
 
-        swift_code = SwiftCodeGenerator(
-            lexicon, cycle_detector, emit_server_contracts=emit_server_contracts
-        ).convert()
+        should_emit_server_contracts = False
+        if isinstance(emit_server_contracts, bool):
+            should_emit_server_contracts = emit_server_contracts
+        elif isinstance(emit_server_contracts, (list, tuple, set)):
+            should_emit_server_contracts = any(
+                lexicon_id == ns or lexicon_id.startswith(f"{ns}.")
+                for ns in emit_server_contracts
+            )
 
+        should_emit_xrpc_error_parsing = False
+        if isinstance(emit_xrpc_error_parsing, bool):
+            should_emit_xrpc_error_parsing = emit_xrpc_error_parsing
+        elif isinstance(emit_xrpc_error_parsing, (list, tuple, set)):
+            should_emit_xrpc_error_parsing = any(
+                lexicon_id == ns or lexicon_id.startswith(f"{ns}.")
+                for ns in emit_xrpc_error_parsing
+            )
+
+        swift_code = SwiftCodeGenerator(
+            lexicon,
+            cycle_detector,
+            emit_server_contracts=should_emit_server_contracts,
+            emit_xrpc_error_parsing=should_emit_xrpc_error_parsing,
+        ).convert()
         if overlay:
             # Overlay files compile in a separate module and need the core import.
             swift_code = swift_code.replace('import Foundation', 'import Foundation\nimport Petrel', 1)
@@ -500,10 +521,8 @@ async def generate_kotlin_from_lexicons_recursive(
 ):
     """Generate Kotlin code from lexicons."""
     namespace_hierarchy = {}
+    expected_files = {}
     cycle_detector = CycleDetector()
-
-    if not os.path.exists(output_folder):
-        os.makedirs(output_folder)
 
     print("Generating Kotlin code...")
 
@@ -525,7 +544,12 @@ async def generate_kotlin_from_lexicons_recursive(
 
     print(f"Loaded {len(lexicons)} lexicons for Kotlin generation")
 
-    async def process_kotlin_lexicon(filepath, lexicon):
+    def add_expected_file(relative_path, content):
+        if relative_path in expected_files:
+            raise ValueError(f"duplicate generated Kotlin target: {relative_path}")
+        expected_files[relative_path] = content
+
+    for filepath, lexicon in lexicons:
         lexicon_id = lexicon.get('id', '')
         defs = lexicon.get('defs', {})
 
@@ -543,39 +567,22 @@ async def generate_kotlin_from_lexicons_recursive(
         # Create hierarchical output path based on lexicon namespace
         # e.g., "app.bsky.feed.post" -> "lexicons/app/bsky/"
         namespace_path = get_namespace_path(lexicon_id).lower()
-        lexicon_output_dir = os.path.join(output_folder, 'lexicons', namespace_path)
-        os.makedirs(lexicon_output_dir, exist_ok=True)
-
         output_filename = f"{convert_to_pascal_case(lexicon_id)}.kt"
-        output_file_path = os.path.join(lexicon_output_dir, output_filename)
-        async with aiofiles.open(output_file_path, 'w') as kotlin_file:
-            await kotlin_file.write(kotlin_code)
-
-    # Second pass: Generate code
-    tasks = []
-    for filepath, lexicon in lexicons:
-        tasks.append(asyncio.create_task(process_kotlin_lexicon(filepath, lexicon)))
-
-    await asyncio.gather(*tasks)
+        output_file_path = f"lexicons/{namespace_path}/{output_filename}"
+        add_expected_file(output_file_path, kotlin_code)
 
     # Generate namespace classes for Kotlin (inner content only, like Swift)
-    client_dir = os.path.join(output_folder, 'client')
-    os.makedirs(client_dir, exist_ok=True)
-
     if overlay:
         overlay_namespaces = generate_kotlin_overlay_namespaces(namespace_hierarchy, reference_hierarchy)
-        overlay_path = os.path.join(client_dir, f'{package_name}Namespaces.kt')
-        async with aiofiles.open(overlay_path, 'w') as f:
-            await f.write(overlay_namespaces)
+        overlay_path = f'client/{package_name}Namespaces.kt'
+        add_expected_file(overlay_path, overlay_namespaces)
     else:
         kotlin_namespace_classes = generate_kotlin_namespace_classes(namespace_hierarchy)
         kotlin_client = render_kotlin_atproto_client(kotlin_namespace_classes)
+        client_main_file_path = 'client/ATProtoClientGenerated.kt'
+        add_expected_file(client_main_file_path, kotlin_client)
 
-        # Output main client file to client directory within output folder
-        client_main_file_path = os.path.join(client_dir, 'ATProtoClientGenerated.kt')
-        async with aiofiles.open(client_main_file_path, 'w') as client_file:
-            await client_file.write(kotlin_client)
-
+    await write_kotlin_projection(output_folder, expected_files)
     print(f"Kotlin generation complete: {len(lexicons)} files generated")
 
 
@@ -730,7 +737,8 @@ async def run_manifest(manifest_path, language='both', graph_path=None):
             exclude_namespaces=exclude, reference_dirs=reference_dirs,
             overlay=overlay, package_name=package_name,
             core_namespace_roots=core_namespace_roots,
-            emit_server_contracts=bool(swift_cfg.get('emit_server_contracts', False)),
+            emit_server_contracts=swift_cfg.get('emit_server_contracts', False),
+            emit_xrpc_error_parsing=swift_cfg.get('emit_xrpc_error_parsing', False),
         ))
     kotlin_cfg = manifest.get('kotlin')
     if kotlin_cfg and language in ('kotlin', 'both'):
