@@ -1610,6 +1610,18 @@ public actor NetworkService: NetworkServiceProtocol {
                     throw NetworkError.responseError(statusCode: httpResponse.statusCode)
 
                 case 500 ..< 600:
+                    // 501 Not Implemented can never succeed on retry; fail fast so
+                    // unsupported endpoints don't hold the caller for the full
+                    // retry/backoff window.
+                    if httpResponse.statusCode == 501 {
+                        LogManager.logError(
+                            "Network Service - 501 Not Implemented for \(requestToSend.url.map { LogManager.sanitizeURLForLogging($0) } ?? "Unknown URL"); not retrying"
+                        )
+                        if returnsTerminalHTTPErrorResponses {
+                            return (decompressedData, httpResponse)
+                        }
+                        throw NetworkError.responseError(statusCode: httpResponse.statusCode)
+                    }
                     // Server errors - may be worth retrying
                     LogManager.logError(
                         "Network Service - Server error \(httpResponse.statusCode) for \(requestToSend.url.map { LogManager.sanitizeURLForLogging($0) } ?? "Unknown URL"). Retry \(retryCount + 1)/\(maxRetries)."

@@ -13,9 +13,10 @@ extension ATProtoClient.{{ template_namespace_name }} {
     /// {% elif input_struct_name %}
     /// - Parameter input: The input parameters for the request
     {% if parameters_struct_name %}/// - Parameter params: The query parameters for the request{% endif %}
-    /// {% elif parameters_struct_name %}
+    ///     {% elif parameters_struct_name %}
     /// - Parameter params: The query parameters for the request
     /// {% endif %}
+    ///   - additionalHeaders: Extra headers merged over the service-DID proxy headers; caller values win.
     /// - Returns: {% if output_type %}A tuple containing the HTTP response code and the decoded response data{% else %}The HTTP response code{% endif %}
     /// - Throws: NetworkError if the request fails or the response cannot be processed
     public func {{ procedure_name | lowerCamelCase }}(
@@ -32,7 +33,8 @@ extension ATProtoClient.{{ template_namespace_name }} {
         params: {{ parameters_struct_name }}{% endif %}
         {% elif parameters_struct_name %}
         params: {{ parameters_struct_name }}
-        {% endif %}
+        {% endif %}{% if is_blob_upload or is_binary_data or input_struct_name or parameters_struct_name %},{% endif %}
+        additionalHeaders: [String: String]? = nil
     ) async throws -> {% if output_type %}(responseCode: Int, data: {{ output_type }}?){% else %}Int{% endif %} {
         let endpoint = "{{ endpoint | escapeStringLiteral }}"
         {% if is_blob_upload %}
@@ -85,7 +87,8 @@ extension ATProtoClient.{{ template_namespace_name }} {
         // Determine service DID for this endpoint
         let serviceDID = await networkService.getServiceDID(for: "{{ endpoint | escapeStringLiteral }}")
         let proxyHeaders = serviceDID.map { ["atproto-proxy": $0] }
-        let ({% if output_type or has_errors or emit_xrpc_error_parsing %}responseData, {% else %}_, {% endif %}response) = try await networkService.{% if has_errors or emit_xrpc_error_parsing %}performRequestReturningHTTPErrorResponses{% else %}performRequest{% endif %}(urlRequest, skipTokenRefresh: false, additionalHeaders: proxyHeaders)
+        let requestHeaders = (proxyHeaders ?? [:]).merging(additionalHeaders ?? [:]) { _, caller in caller }
+        let ({% if output_type or has_errors or emit_xrpc_error_parsing %}responseData, {% else %}_, {% endif %}response) = try await networkService.{% if has_errors or emit_xrpc_error_parsing %}performRequestReturningHTTPErrorResponses{% else %}performRequest{% endif %}(urlRequest, skipTokenRefresh: false, additionalHeaders: requestHeaders.isEmpty ? nil : requestHeaders)
         let responseCode = response.statusCode
 
         {% if output_type %}
