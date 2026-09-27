@@ -471,6 +471,8 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
     let coordinator = SerialOperationCoordinator()
 
     private let gatewayURL: URL
+    /// The app's https callback the gateway returns a sign-in to; checked exactly.
+    private let callbackURL: URL
     private let storage: KeychainStorage
     private let accountManager: AccountManaging
     private let urlSession: URLSession
@@ -504,11 +506,13 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
 
     init(
         gatewayURL: URL,
+        callbackURL: URL = ConfidentialGatewayStrategy.defaultCallbackURL,
         storage: KeychainStorage,
         accountManager: AccountManaging,
         urlSession: URLSession? = nil
     ) {
         self.gatewayURL = gatewayURL
+        self.callbackURL = callbackURL
         self.storage = storage
         self.accountManager = accountManager
         if let urlSession {
@@ -622,7 +626,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         let pending = PendingGatewayLoginState(
             browserNonce: browserNonce,
             stateToken: stateToken,
-            redirectURI: Self.defaultCallbackURL.absoluteString,
+            redirectURI: callbackURL.absoluteString,
             expectedDID: expectedDID,
             createdAt: Date()
         )
@@ -653,7 +657,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         components.path = "/auth/login"
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "browser_nonce", value: browserNonce),
-            URLQueryItem(name: "redirect_to", value: Self.defaultCallbackURL.absoluteString)
+            URLQueryItem(name: "redirect_to", value: callbackURL.absoluteString)
         ]
         if let identifier {
             queryItems.append(URLQueryItem(name: "identifier", value: identifier))
@@ -697,7 +701,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         let pending = PendingGatewayLoginState(
             browserNonce: browserNonce,
             stateToken: stateToken,
-            redirectURI: Self.defaultCallbackURL.absoluteString,
+            redirectURI: callbackURL.absoluteString,
             expectedDID: nil,
             createdAt: Date()
         )
@@ -728,7 +732,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         components.path = "/auth/login"
         var queryItems: [URLQueryItem] = [
             URLQueryItem(name: "browser_nonce", value: browserNonce),
-            URLQueryItem(name: "redirect_to", value: Self.defaultCallbackURL.absoluteString)
+            URLQueryItem(name: "redirect_to", value: callbackURL.absoluteString)
         ]
         if let pdsURL {
             queryItems.append(URLQueryItem(name: "pds", value: pdsURL.absoluteString))
@@ -749,17 +753,23 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         let session_id: String
     }
 
-    private static func isExactCallbackBase(_ url: URL) -> Bool {
+    private static func isExactCallbackBase(_ url: URL, expected: URL) -> Bool {
         guard let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else {
             return false
         }
         guard components.scheme?.lowercased() == "https" else { return false }
-        guard components.host?.lowercased() == "catbird.blue" else { return false }
-        guard components.path == "/oauth/callback" else { return false }
+        guard components.host?.lowercased() == expected.host?.lowercased() else { return false }
+        guard components.path == expected.path else { return false }
         guard components.user == nil && components.password == nil else { return false }
-        if let port = components.port, port != 443 { return false }
+        if let port = components.port, port != (expected.port ?? 443) { return false }
         guard components.fragment == nil else { return false }
         return true
+    }
+
+    /// `scheme://host[:port]` of the app's callback, sent as the exchange's Origin.
+    private static func origin(of url: URL) -> String {
+        guard let scheme = url.scheme?.lowercased(), let host = url.host?.lowercased() else { return "" }
+        return url.port.map { "\(scheme)://\(host):\($0)" } ?? "\(scheme)://\(host)"
     }
 
     func handleOAuthCallback(url: URL) async throws -> (did: String, handle: String?, pdsURL: URL) {
@@ -774,7 +784,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
             throw GatewayError.invalidCallbackURL
         }
 
-        guard Self.isExactCallbackBase(url) else {
+        guard Self.isExactCallbackBase(url, expected: callbackURL) else {
             throw GatewayError.invalidCallbackURL
         }
 
@@ -850,7 +860,7 @@ actor ConfidentialGatewayStrategy: AuthStrategy {
         // Exchange code with browser nonce
         var exchangeReq = URLRequest(url: gatewayURL.appendingPathComponent("auth/exchange"))
         exchangeReq.httpMethod = "POST"
-        exchangeReq.setValue("https://catbird.blue", forHTTPHeaderField: "Origin")
+        exchangeReq.setValue(Self.origin(of: callbackURL), forHTTPHeaderField: "Origin")
         exchangeReq.setValue("application/json", forHTTPHeaderField: "Content-Type")
         exchangeReq.setValue("application/json", forHTTPHeaderField: "Accept")
 

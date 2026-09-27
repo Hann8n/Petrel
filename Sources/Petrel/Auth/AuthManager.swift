@@ -52,6 +52,7 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
     private let oauthConfig: OAuthConfig
     private let didResolver: DIDResolving
     private let gatewayBaseURL: URL?
+    private let gatewayCallbackURL: URL?
     private var authContinuity: AuthContinuityState
     private var authContinuityObserver: (@Sendable () async -> Void)?
     private var pendingAuthContinuityMutations = 0
@@ -71,6 +72,7 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
     ///   - oauthConfig: OAuth configuration for public OAuth flow.
     ///   - didResolver: Resolver for DID and handle lookups.
     ///   - gatewayBaseURL: Base URL for gateway mode (required if mode is .gateway).
+    ///   - gatewayCallbackURL: The app's https callback for gateway sign-in (default: the strategy's).
     /// - Throws: `ManagerError.gatewayURLRequired` if gateway mode is requested without a URL.
     init(
         mode: Mode,
@@ -79,7 +81,8 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
         networkService: NetworkService,
         oauthConfig: OAuthConfig,
         didResolver: DIDResolving,
-        gatewayBaseURL: URL? = nil
+        gatewayBaseURL: URL? = nil,
+        gatewayCallbackURL: URL? = nil
     ) throws {
         self.storage = storage
         self.accountManager = accountManager
@@ -87,6 +90,7 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
         self.oauthConfig = oauthConfig
         self.didResolver = didResolver
         self.gatewayBaseURL = gatewayBaseURL
+        self.gatewayCallbackURL = gatewayCallbackURL
         currentMode = mode
         authContinuity = AuthContinuityState(mode: mode.authMode)
 
@@ -97,7 +101,8 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
             networkService: networkService,
             oauthConfig: oauthConfig,
             didResolver: didResolver,
-            gatewayBaseURL: gatewayBaseURL
+            gatewayBaseURL: gatewayBaseURL,
+            gatewayCallbackURL: gatewayCallbackURL
         )
     }
 
@@ -124,7 +129,8 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
             networkService: networkService,
             oauthConfig: oauthConfig,
             didResolver: didResolver,
-            gatewayBaseURL: gatewayBaseURL
+            gatewayBaseURL: gatewayBaseURL,
+            gatewayCallbackURL: gatewayCallbackURL
         )
 
         // No suspension is permitted between publishing the continuity mode and
@@ -144,7 +150,8 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
         networkService: NetworkService,
         oauthConfig: OAuthConfig,
         didResolver: DIDResolving,
-        gatewayBaseURL: URL?
+        gatewayBaseURL: URL?,
+        gatewayCallbackURL: URL?
     ) throws -> AuthStrategy {
         switch mode {
         case .legacy:
@@ -170,6 +177,7 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
             }
             return ConfidentialGatewayStrategy(
                 gatewayURL: gatewayURL,
+                callbackURL: gatewayCallbackURL ?? ConfidentialGatewayStrategy.defaultCallbackURL,
                 storage: storage,
                 accountManager: accountManager
             )

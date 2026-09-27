@@ -156,6 +156,7 @@ public actor ATProtoClient {
     ///   - namespace: The namespace for storage.
     ///   - authMode: The authentication mode to use (default: publicOAuth).
     ///   - gatewayURL: The gateway URL for confidential client mode (required if authMode is .gateway).
+    ///   - gatewayCallbackURL: The app's https callback the gateway returns a sign-in to (default: https://catbird.blue/oauth/callback).
     ///   - userAgent: Optional user agent string for requests.
     ///   - didResolver: Optional custom DID resolver implementation.
     ///   - bskyAppViewDID: Optional custom Bluesky AppView service DID (default: did:web:api.bsky.app#bsky_appview).
@@ -167,6 +168,7 @@ public actor ATProtoClient {
         namespace: String,
         authMode: AuthMode = .publicOAuth,
         gatewayURL: URL? = nil,
+        gatewayCallbackURL: URL? = nil,
         userAgent: String? = nil,
         didResolver: (any DIDResolving)? = nil,
         bskyAppViewDID: String = "did:web:api.bsky.app#bsky_appview",
@@ -243,7 +245,8 @@ public actor ATProtoClient {
             networkService: networkService,
             oauthConfig: oauthConfig,
             didResolver: theDidResolver,
-            gatewayBaseURL: gatewayURL
+            gatewayBaseURL: gatewayURL,
+            gatewayCallbackURL: gatewayCallbackURL
         )
         self.authManager = theAuthManager
 

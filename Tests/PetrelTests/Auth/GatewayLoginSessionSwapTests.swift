@@ -147,6 +147,52 @@ struct GatewayLoginSessionSwapTests {
         )
     }
 
+    @Test("A configured app callback is the one the gateway returns to, and the only one accepted")
+    func testConfiguredCallbackURL() async throws {
+        let backend = InMemorySecureStorage()
+        let appCallback = URL(string: "https://app.example/oauth/callback")!
+        let handler: @Sendable (URLRequest) -> (HTTPURLResponse, Data) = { req in
+            let url = req.url!
+            if url.path.hasSuffix("/auth/exchange") {
+                return (makeHTTPResponse(url: url, statusCode: 200), Data("{\"session_id\":\"\(sampleSessionID)\"}".utf8))
+            } else if url.path.hasSuffix("/auth/session") {
+                let json = "{\"did\":\"\(aliceDID)\",\"handle\":\"alice.test\",\"active\":true}"
+                return (makeHTTPResponse(url: url, statusCode: 200), Data(json.utf8))
+            }
+            return (makeHTTPResponse(url: url, statusCode: 404), Data("{}".utf8))
+        }
+
+        try await withGatewayLoginTransport(backend, handler: handler) {
+            let storage = KeychainStorage(namespace: "test.gateway.configured_callback")
+            let accountManager = await AccountManager(storage: storage)
+            let config = URLSessionConfiguration.ephemeral
+            config.protocolClasses = [GatewayLoginTestURLProtocol.self]
+            let strategy = ConfidentialGatewayStrategy(
+                gatewayURL: gatewayURL,
+                callbackURL: appCallback,
+                storage: storage,
+                accountManager: accountManager,
+                urlSession: URLSession(configuration: config)
+            )
+
+            let (loginURL, stateToken) = try await strategy.startOAuthFlowWithState(identifier: "alice.test")
+            let redirectTo = URLComponents(url: loginURL, resolvingAgainstBaseURL: false)?
+                .queryItems?.first { $0.name == "redirect_to" }?.value
+            #expect(redirectTo == appCallback.absoluteString)
+
+            // The default callback is not this app's.
+            await #expect(throws: (any Error).self) {
+                try await strategy.handleOAuthCallback(url: URL(string: "\(callbackBase)?code=\(validCode)&state=\(stateToken)")!)
+            }
+
+            let (_, freshState) = try await strategy.startOAuthFlowWithState(identifier: "alice.test")
+            let result = try await strategy.handleOAuthCallback(url: URL(string: "\(appCallback.absoluteString)?code=\(validCode)&state=\(freshState)")!)
+            #expect(result.did == aliceDID)
+            let exchange = GatewayLoginTestURLProtocol.recordedRequests().first { $0.url?.path.hasSuffix("/auth/exchange") == true }
+            #expect(exchange?.value(forHTTPHeaderField: "Origin") == "https://app.example")
+        }
+    }
+
     @Test("Step 1 & 2: Legacy fragment session_id is strictly rejected")
     func testLegacyFragmentSessionIdRejected() async throws {
         let backend = InMemorySecureStorage()
