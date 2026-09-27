@@ -310,7 +310,12 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
     }
 
     func fetchGrantedScopes(for did: String?) async throws -> Set<String> {
-        try await activeStrategy.fetchGrantedScopes(for: did)
+        do {
+            return try await activeStrategy.fetchGrantedScopes(for: did)
+        } catch ConfidentialGatewayStrategy.GatewayError.missingSession,
+                ConfidentialGatewayStrategy.GatewayError.sessionExpired {
+            throw AuthError.noActiveAccount
+        }
     }
 
     /// Returns the exact OAuth scopes granted to an account, read from its
@@ -344,7 +349,12 @@ actor AuthManager: AuthStrategy, AuthContinuityProviding {
     }
 
     func refreshTokenIfNeeded() async throws -> TokenRefreshResult {
-        try await activeStrategy.refreshTokenIfNeeded()
+        do {
+            return try await activeStrategy.refreshTokenIfNeeded()
+        } catch ConfidentialGatewayStrategy.GatewayError.missingSession,
+                ConfidentialGatewayStrategy.GatewayError.sessionExpired {
+            throw AuthError.noActiveAccount
+        }
     }
 
     func handleUnauthorizedResponse(
