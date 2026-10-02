@@ -228,6 +228,56 @@ final class HTTPErrorResponseTests: XCTestCase {
         XCTAssertEqual(HTTPErrorResponseURLProtocol.requestCount, 3)
     }
 
+    func testWriteIsNotResentAfterServerError() async throws {
+        let body = Data(#"{"error":"InternalServerError"}"#.utf8)
+        HTTPErrorResponseURLProtocol.install(.response(statusCode: 502, body: body))
+        let networkService = NetworkService(baseURL: baseURL)
+
+        let (_, response) = try await networkService
+            .performRequestReturningHTTPErrorResponses(
+                request(path: "xrpc/com.atproto.repo.createRecord", method: "POST"),
+                skipTokenRefresh: false
+            )
+
+        XCTAssertEqual(response.statusCode, 502)
+        XCTAssertEqual(HTTPErrorResponseURLProtocol.requestCount, 1)
+    }
+
+    func testWriteIsNotResentAfterConnectionLost() async {
+        HTTPErrorResponseURLProtocol.install(.failure(URLError(.networkConnectionLost)))
+        let networkService = NetworkService(baseURL: baseURL)
+
+        do {
+            _ = try await networkService.performRequest(
+                request(path: "xrpc/com.atproto.repo.createRecord", method: "POST"),
+                skipTokenRefresh: false
+            )
+            XCTFail("Expected the lost connection to fail the write")
+        } catch NetworkError.requestFailed {
+        } catch {
+            XCTFail("Expected NetworkError.requestFailed, got \(error)")
+        }
+        XCTAssertEqual(HTTPErrorResponseURLProtocol.requestCount, 1)
+    }
+
+    func testWriteIsResentWhenTheConnectionNeverOpened() async throws {
+        let body = Data(#"{"ok":true}"#.utf8)
+        HTTPErrorResponseURLProtocol.install([
+            .failure(URLError(.cannotConnectToHost)),
+            .response(statusCode: 200, body: body),
+        ])
+        let networkService = NetworkService(baseURL: baseURL)
+
+        let (data, response) = try await networkService.performRequest(
+            request(path: "xrpc/com.atproto.repo.createRecord", method: "POST"),
+            skipTokenRefresh: false
+        )
+
+        XCTAssertEqual(response.statusCode, 200)
+        XCTAssertEqual(data, body)
+        XCTAssertEqual(HTTPErrorResponseURLProtocol.requestCount, 2)
+    }
+
     func testNamedPathDoesNotConvertTransportErrorsIntoHTTPResponses() async {
         HTTPErrorResponseURLProtocol.install(.failure(URLError(.cancelled)))
         let networkService = NetworkService(baseURL: baseURL)
@@ -297,8 +347,10 @@ final class HTTPErrorResponseTests: XCTestCase {
 
     private let baseURL = URL(string: "https://example.com")!
 
-    private func request(path: String) -> URLRequest {
-        URLRequest(url: baseURL.appendingPathComponent(path))
+    private func request(path: String, method: String = "GET") -> URLRequest {
+        var request = URLRequest(url: baseURL.appendingPathComponent(path))
+        request.httpMethod = method
+        return request
     }
 
     private static func namedOutcome(
