@@ -476,15 +476,6 @@ public actor NetworkService: NetworkServiceProtocol {
         return decoder
     }()
     private let maxRetries = 3
-
-    /// Whether resending `request` after an ambiguous failure cannot apply it
-    /// twice. XRPC procedures are POSTs and are not assumed idempotent.
-    static func isRetrySafe(_ request: URLRequest) -> Bool {
-        switch (request.httpMethod ?? "GET").uppercased() {
-        case "GET", "HEAD", "OPTIONS", "PUT", "DELETE": true
-        default: false
-        }
-    }
     private var userAgent: String?
     private(set) var protectedResourceMetadata: ProtectedResourceMetadata?
     private(set) var authorizationServerMetadata: AuthorizationServerMetadata?
@@ -1631,17 +1622,6 @@ public actor NetworkService: NetworkServiceProtocol {
                         }
                         throw NetworkError.responseError(statusCode: httpResponse.statusCode)
                     }
-                    // A write the server may already have applied is not
-                    // repeated: retrying a POST after a 5xx can publish it twice.
-                    guard Self.isRetrySafe(requestToSend) else {
-                        LogManager.logError(
-                            "Network Service - Server error \(httpResponse.statusCode) for \(requestToSend.httpMethod ?? "GET") \(requestToSend.url.map { LogManager.sanitizeURLForLogging($0) } ?? "Unknown URL"); not retrying a non-idempotent request"
-                        )
-                        if returnsTerminalHTTPErrorResponses {
-                            return (decompressedData, httpResponse)
-                        }
-                        throw NetworkError.responseError(statusCode: httpResponse.statusCode)
-                    }
                     // Server errors - may be worth retrying
                     LogManager.logError(
                         "Network Service - Server error \(httpResponse.statusCode) for \(requestToSend.url.map { LogManager.sanitizeURLForLogging($0) } ?? "Unknown URL"). Retry \(retryCount + 1)/\(maxRetries)."
@@ -1676,16 +1656,6 @@ public actor NetworkService: NetworkServiceProtocol {
                 where error.code == .timedOut || error.code == .cannotFindHost
                 || error.code == .cannotConnectToHost || error.code == .networkConnectionLost
             {
-                // A timeout or dropped connection may come after the server
-                // received the request, so only a request that never left
-                // (no host, no connection) or an idempotent one is resent.
-                let neverSent = error.code == .cannotFindHost || error.code == .cannotConnectToHost
-                guard neverSent || Self.isRetrySafe(currentRequest) else {
-                    LogManager.logError(
-                        "Network Service - Network error: \(error.localizedDescription); not retrying a non-idempotent request."
-                    )
-                    throw NetworkError.requestFailed
-                }
                 LogManager.logDebug(
                     "Network Service - Network error: \(error.localizedDescription). Retry \(retryCount + 1)/\(maxRetries)."
                 )
