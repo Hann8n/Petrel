@@ -126,6 +126,73 @@ struct GatewayLoginSessionSwapTests {
     private let bobDID = "did:plc:bob9876543210987654321"
     private let sampleSessionID = "123e4567-e89b-12d3-a456-426614174000"
 
+    @Test("AuthManager preserves gateway grants and distinguishes expiration from temporary failure", arguments: [200, 401, 502])
+    func testAuthManagerGatewayGrantedScopes(status: Int) async throws {
+        let backend = InMemorySecureStorage()
+        try await withGatewayLoginTransport(backend, handler: { req in
+            let json = status == 200
+                ? "{\"did\":\"\(aliceDID)\",\"active\":true,\"granted_scopes\":[\"atproto\",\"blob:*/*\"]}"
+                : "{\"error\":\"session_expired\"}"
+            return (makeHTTPResponse(url: req.url!, statusCode: status), Data(json.utf8))
+        }) {
+            let storage = KeychainStorage(namespace: "test.gateway.manager.scopes.\(status)")
+            let accounts = await AccountManager(storage: storage)
+            try await accounts.addAccount(Account(did: aliceDID, handle: "alice.test", pdsURL: gatewayURL))
+            try await accounts.setCurrentAccount(did: aliceDID)
+            try await storage.saveGatewaySession(sampleSessionID, for: aliceDID)
+            let manager = try AuthManager(
+                mode: .gateway, storage: storage, accountManager: accounts,
+                networkService: NetworkService(baseURL: gatewayURL),
+                oauthConfig: OAuthConfig(clientId: "https://client.example/client-metadata.json", redirectUri: callbackBase, scope: "atproto"),
+                didResolver: MockDIDResolver(), gatewayBaseURL: gatewayURL
+            )
+            if status == 200 {
+                #expect(try await manager.fetchGrantedScopes(for: nil) == ["atproto", "blob:*/*"])
+            } else if status == 401 {
+                await #expect(throws: AuthError.noActiveAccount) {
+                    try await manager.fetchGrantedScopes(for: nil)
+                }
+            } else {
+                do {
+                    _ = try await manager.fetchGrantedScopes(for: nil)
+                    Issue.record("Expected a recoverable gateway error")
+                } catch ConfidentialGatewayStrategy.GatewayError.invalidSession {
+                    // A temporary gateway failure must not become a terminal auth error.
+                }
+                #expect(try await storage.getGatewaySession(for: aliceDID) == sampleSessionID)
+                _ = try await manager.refreshTokenIfNeeded()
+            }
+            let request = try #require(GatewayLoginTestURLProtocol.recordedRequests().last)
+            #expect(request.url?.path == "/auth/session")
+            #expect(request.value(forHTTPHeaderField: "Authorization") == "Bearer \(sampleSessionID)")
+        }
+    }
+
+    @Test("AuthManager exposes missing gateway credentials as a public auth error")
+    func testAuthManagerMissingGatewaySession() async throws {
+        try await withGatewayLoginTransport(InMemorySecureStorage(), handler: { req in
+            (makeHTTPResponse(url: req.url!, statusCode: 500), Data("{}".utf8))
+        }) {
+            let storage = KeychainStorage(namespace: "test.gateway.manager.missing")
+            let accounts = await AccountManager(storage: storage)
+            try await accounts.addAccount(Account(did: aliceDID, handle: "alice.test", pdsURL: gatewayURL))
+            try await accounts.setCurrentAccount(did: aliceDID)
+            let manager = try AuthManager(
+                mode: .gateway, storage: storage, accountManager: accounts,
+                networkService: NetworkService(baseURL: gatewayURL),
+                oauthConfig: OAuthConfig(clientId: "https://client.example/client-metadata.json", redirectUri: callbackBase, scope: "atproto"),
+                didResolver: MockDIDResolver(), gatewayBaseURL: gatewayURL
+            )
+            await #expect(throws: AuthError.noActiveAccount) {
+                try await manager.fetchGrantedScopes(for: nil)
+            }
+            await #expect(throws: AuthError.noActiveAccount) {
+                try await manager.refreshTokenIfNeeded()
+            }
+            #expect(GatewayLoginTestURLProtocol.recordedRequests().isEmpty)
+        }
+    }
+
     private func makeStrategy(
         storage: KeychainStorage,
         accountManager: AccountManaging,
